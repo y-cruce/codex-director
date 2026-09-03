@@ -1,70 +1,72 @@
 # codex-director
 
-让 Claude Code 把读代码、排查、写实现、代码 review 全部派给 Codex，自己只负责跟用户对话、写任务书、判断结果。
+English | [中文](README.zh-CN.md)
 
-适合的场景：你同时有 Claude Code 和 Codex（ChatGPT 订阅），Claude 的额度或上下文比 Codex 更紧张，想让 Claude 少读文件、少写代码，把这些活交给 Codex 做。
+Make Claude Code hand off code reading, debugging, implementation, and code review to Codex. Claude keeps only three jobs: talking to the user, writing the task brief, and judging the result.
 
-## 做了什么
+Use it when you run both Claude Code and Codex (ChatGPT subscription), Claude's quota or context is the tighter resource, and you want Claude to read fewer files and write less code.
 
-两个文件加一段配置：
+## What it consists of
 
-| 文件 | 作用 |
+Two files and one config snippet:
+
+| File | Purpose |
 |---|---|
-| `skills/codex-director/SKILL.md` | 给 Claude 主线程的工作规则：什么活派出去、任务书怎么写、并行怎么派、review 循环怎么跑 |
-| `agents/codex-worker.md` | 一个只有 Bash 工具的子 agent。收到任务书后调用官方 Codex 插件的脚本，把 Codex 放到后台跑，跑完把输出原样带回 |
-| `docs/claude-md-snippet.md` | 加进 `CLAUDE.md` 的路由规则，保证相关任务每次都走这条路 |
+| `skills/codex-director/SKILL.md` | Working rules for the Claude main thread: what to delegate, how to write a brief, how to run things in parallel, how the review loop works |
+| `agents/codex-worker.md` | A subagent with only the Bash tool. It takes a brief, calls the official Codex plugin's script, runs Codex in the background, and returns the output unchanged |
+| `docs/claude-md-snippet.md` | A routing rule for `CLAUDE.md` so that matching tasks always go through this path |
 
-工作流程：
+Flow:
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户
-    participant C as Claude 主线程
+    participant U as User
+    participant C as Claude main thread
     participant W as codex-worker
     participant X as Codex
 
-    U->>C: 描述需求
-    C->>C: 加载 codex-director，写任务书
-    par 并行派发
+    U->>C: describes the task
+    C->>C: loads codex-director, writes a brief
+    par parallel dispatch
         C->>W: MODE: implement
         C->>W: MODE: investigate
     end
-    W->>X: 后台启动 codex-companion task
-    W-->>C: WAITING（挂起等待）
-    X-->>W: 进程退出，唤醒
-    W-->>C: STATUS: done + Codex 原文
+    W->>X: starts codex-companion task in the background
+    W-->>C: WAITING (suspended)
+    X-->>W: process exits, worker wakes
+    W-->>C: STATUS: done + Codex output verbatim
     C->>W: MODE: adversarial-review
     W->>X: review
-    X-->>W: 问题列表
-    W-->>C: 原文回传
-    C->>W: MODE: continue, WRITE: yes（让 Codex 自己修）
-    C->>C: 跑测试、抽查 文件:行号
-    C->>U: 汇报
+    X-->>W: findings
+    W-->>C: verbatim
+    C->>W: MODE: continue, WRITE: yes (Codex fixes its own findings)
+    C->>C: runs tests, spot-checks file:line claims
+    C->>U: reports
 ```
 
-## 和官方 Codex 插件的关系
+## Relationship to the official Codex plugin
 
-依赖 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)，所有对 Codex 的调用都走它的 `codex-companion.mjs` 脚本。本仓库不改插件，只在外面加一层分工规则和一个转发 agent。
+This depends on [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc). Every call to Codex goes through its `codex-companion.mjs` script. Nothing in the plugin is modified; this repo adds a layer of delegation rules and one forwarding agent on top.
 
-官方插件自带的 `codex:codex-rescue` 也是转发器，区别在下面几点：
+The plugin ships its own forwarder, `codex:codex-rescue`. The differences:
 
-| | 官方 codex-rescue | 本仓库 codex-worker |
+| | Official codex-rescue | codex-worker (this repo) |
 |---|---|---|
-| 触发方式 | 用户手动 `/codex:rescue`，或 Claude 卡住时求助 | Claude 按规则默认派发，用户不用提 Codex |
-| 默认是否改文件 | 默认 `--write` | 按 MODE 决定：investigate 只读，implement 才写 |
-| 长任务 | 前台等待，超过 Claude Code 的 Bash 上限（10 分钟）会被杀 | 后台启动，转发器挂起等待，Codex 跑多久都行 |
-| review 输入 | 工作区模式会把每个未跟踪文件的内容塞进提示词，未跟踪文件多的仓库会超出 Codex 输入上限 | 有基准分支就走分支模式；没有就数未跟踪文件，超过 3 个自动改用只读 task 做 review |
-| 输出 | 原样 | 原样，只在最前面加一行 `STATUS:` |
+| Trigger | User runs `/codex:rescue`, or Claude asks for help when stuck | Claude delegates by default according to the rules; the user never has to mention Codex |
+| Writes files by default | Yes (`--write`) | Depends on MODE: `investigate` is read-only, only `implement` writes |
+| Long runs | Waits in the foreground and gets killed at Claude Code's 10-minute Bash limit | Starts Codex in the background and suspends; Codex can run as long as it needs |
+| Review input | Working-tree mode inlines the content of every untracked file into the prompt; repos with many untracked files exceed Codex's input limit | Uses branch mode when a base ref is given; otherwise counts untracked files and, above 3, falls back to a read-only task that reviews via git itself |
+| Output | Verbatim | Verbatim, with a single `STATUS:` line prepended |
 
-## 安装
+## Install
 
-前置条件：
+Prerequisites:
 
-1. Claude Code（验证过 2.1.259）
-2. Codex CLI 已安装并登录（验证过 0.152.1）：`npm install -g @openai/codex && codex login`
-3. 官方 Codex 插件已装（验证过 1.0.6）：在 Claude Code 里执行 `/plugin install codex@openai-codex`，然后 `/codex:setup` 确认状态是 ready
+1. Claude Code (tested with 2.1.259)
+2. Codex CLI installed and logged in (tested with 0.152.1): `npm install -g @openai/codex && codex login`
+3. The official Codex plugin (tested with 1.0.6): run `/plugin install codex@openai-codex` in Claude Code, then `/codex:setup` and confirm it reports ready
 
-安装本仓库：
+Install this repo:
 
 ```bash
 git clone https://github.com/y-cruce/codex-director.git
@@ -72,74 +74,74 @@ cd codex-director
 ./install.sh
 ```
 
-脚本把 agent 和 skill 复制到 `~/.claude/`。然后按 `docs/claude-md-snippet.md` 把路由规则加到 `~/.claude/CLAUDE.md`，在 Claude Code 里执行 `/reload-plugins` 或重开会话。
+The script copies the agent and the skill into `~/.claude/`. Then append the snippet from `docs/claude-md-snippet.md` to `~/.claude/CLAUDE.md` and run `/reload-plugins` in Claude Code, or start a new session.
 
-## 使用
+## Usage
 
-安装后不需要任何新命令。对 Claude 说平时的话就行：
+No new commands. Talk to Claude as usual:
 
 ```
-这个接口偶尔返回 500，帮我查一下原因
-把订单导出改成异步的，完成后发邮件通知
-review 一下这个分支的改动
+This endpoint returns 500 occasionally, find out why
+Make order export asynchronous and send an email when it finishes
+Review the changes on this branch
 ```
 
-Claude 会加载 codex-director，写任务书，派 codex-worker，等结果，抽查，汇报。你也可以直接点名：「用 codex 查一下 X」。
+Claude loads codex-director, writes a brief, dispatches codex-worker, waits, spot-checks, and reports. You can also name it directly: "ask codex to look into X".
 
-### 任务书格式
+### Brief format
 
-Claude 派给 codex-worker 的内容长这样。头部几行是控制参数，空一行后是给 Codex 看的正文：
+What Claude sends to codex-worker. A few header lines carry control parameters; after a blank line comes the body Codex reads:
 
 ```
 MODE: implement
 EFFORT: high
 
-## 目标
+## Goal
 ...
-## 背景
+## Context
 ...
-## 约束
+## Constraints
 ...
-## 验收
+## Acceptance
 ...
 ```
 
-| MODE | 做什么 | 会不会改文件 |
+| MODE | What it does | Writes files |
 |---|---|---|
-| `investigate` | 读代码、追调用链、排查根因 | 不会 |
-| `implement` | 按任务书写实现 | 会 |
-| `continue` | 接着上一轮 Codex 的线程继续 | 头部有 `WRITE: yes` 才会 |
-| `review` | 官方 review | 不会 |
-| `adversarial-review` | 挑刺式 review，正文写关注点 | 不会 |
+| `investigate` | Read code, trace call chains, find root causes | No |
+| `implement` | Implement according to the brief | Yes |
+| `continue` | Continue the previous Codex thread | Only with `WRITE: yes` in the header |
+| `review` | The plugin's standard review | No |
+| `adversarial-review` | Challenge-style review; the body is the focus text | No |
 
-可选头部：`EFFORT`（`medium` / `high` / `xhigh`，缺省 high）、`MODEL`（缺省用你 Codex 配置里的模型）、`BASE`（review 类的基准分支）。
+Optional headers: `EFFORT` (`medium` / `high` / `xhigh`, default high), `MODEL` (defaults to the model in your Codex config), `BASE` (base ref for review modes).
 
-### 看进度
+### Checking progress
 
-Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最近完成的任务及当前阶段。`/codex:result <job-id>` 看某次的完整输出。
+While Codex is running, `/codex:status` lists the running and recently finished jobs in the current repo with their current phase. `/codex:result <job-id>` shows the full output of one job.
 
-## 设计上的几个决定
+## Design decisions
 
-**Codex 输出不压缩。** 转发器把 Codex 的 stdout 一字不动带回主线程。省 Claude 上下文的手段只有分工本身（Claude 不读文件、不写代码），不靠截断或摘要 Codex 的回答。
+**Codex output is never compressed.** The forwarder returns Codex's stdout unchanged. Claude's context is saved by the division of labor itself (Claude does not read files or write code), not by truncating or summarizing Codex's answer.
 
-**多派几路。** 改代码类任务默认并行派 `implement` 和 `investigate` 两路，实现回来后再派 `adversarial-review`，有问题让 Codex 用 `continue` 自己修，最多三轮。Claude 只在循环卡住或需要取舍时介入。
+**Dispatch more than one route.** For code changes, `implement` and `investigate` run in parallel by default. When the implementation comes back, `adversarial-review` runs on it. Findings go back to Codex via `continue` to fix, up to three rounds. Claude steps in only when the loop stalls or a judgment call is needed.
 
-**并行改文件用 worktree。** 同一个 checkout 里同时只跑一路 `implement`。要让 Codex 用两种方案各写一版，派 agent 时加 `isolation: "worktree"`，各改各的，Claude 最后挑。
+**Parallel writes use worktrees.** Only one `implement` runs per checkout at a time. To have Codex produce two approaches, dispatch the agent with `isolation: "worktree"` so each works in its own tree, and Claude picks one.
 
-**后台启动、挂起、唤醒。** Claude Code 的 Bash 工具前台调用最多 10 分钟。转发器用 `run_in_background` 启动 Codex，然后结束自己的回合等唤醒。这是 Claude Code 提供的等法，等多久都不占用任何东西。
+**Background start, suspend, wake.** Claude Code's Bash tool allows at most 10 minutes per foreground call. The forwarder starts Codex with `run_in_background`, then ends its turn and waits to be woken. This is the wait mechanism Claude Code provides; it costs nothing regardless of duration.
 
-**判断逻辑写进 shell，不靠模型自觉。** review 类任务的分支模式 / 工作区模式 / 兜底三选一，写成了固定脚本，转发器只填 MODE、BASE、正文三处。
+**Decision logic lives in shell, not in the model's judgment.** For review modes, the choice between branch mode, working-tree mode, and the fallback is a fixed script. The forwarder fills in MODE, BASE, and the body, nothing else.
 
-**文档由 Claude 自己写。** 给人看的文档和页面不派给 Codex，Codex 只负责查素材。这条只约束 Claude 的分工，不写进给 Codex 的任务书，Codex 写代码时顺手改注释或 README 不去干预。
+**Claude writes the documents.** Human-facing documents and pages are not delegated; Codex only gathers material. This rule constrains Claude's side only and is not written into briefs, so Codex updating comments or a README while coding is left alone.
 
-## 已知限制
+## Known limitations
 
-- 转发器启动 Codex 后会先给主线程发一条只有 `WAITING` 的通知，Codex 跑完后再发真正的结果。技能里已写明忽略第一条。
-- 改了 `~/.claude/agents/` 里的 agent 定义，同一会话不会立刻生效，要 `/reload-plugins` 或重开会话。
-- 官方插件的 `review` 模式不接受关注点文本，只有 `adversarial-review` 接受。
-- `continue` 依赖官方插件的 `--resume-last`，同仓库有别的 Codex 任务在跑时它会拒绝，等跑完再派。
-- 只在 macOS 上验证过。脚本用 `python3` 和标准 shell 工具，Linux 应该能用，没测。
+- After starting Codex, the forwarder sends the main thread one notification containing only `WAITING`; the real result arrives when Codex exits. The skill tells Claude to ignore the first one.
+- Edits to agent definitions in `~/.claude/agents/` do not take effect in the current session until `/reload-plugins` or a new session.
+- The plugin's `review` mode does not accept focus text; only `adversarial-review` does.
+- `continue` relies on the plugin's `--resume-last`, which refuses while another Codex job is running in the same repo. Wait for it to finish.
+- Tested on macOS only. The scripts use `python3` and standard shell tools; Linux should work but is untested.
 
-## 许可
+## License
 
 MIT
