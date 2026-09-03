@@ -57,6 +57,7 @@ The plugin ships its own forwarder, `codex:codex-rescue`. The differences:
 | Long runs | Waits in the foreground and gets killed at Claude Code's 10-minute Bash limit | Starts Codex in the background and suspends; Codex can run as long as it needs |
 | Review input | Working-tree mode inlines the content of every untracked file into the prompt; repos with many untracked files exceed Codex's input limit | Uses branch mode when a base ref is given; otherwise counts untracked files and, above 3, falls back to a read-only task that reviews via git itself |
 | Output | Verbatim | Verbatim, with a single `STATUS:` line prepended |
+| Language | English | All prompts and rules are in English; neither Codex nor Claude is forced to answer in a particular language |
 
 ## Install
 

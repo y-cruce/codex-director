@@ -57,6 +57,7 @@ sequenceDiagram
 | 长任务 | 前台等待，超过 Claude Code 的 Bash 上限（10 分钟）会被杀 | 后台启动，转发器挂起等待，Codex 跑多久都行 |
 | review 输入 | 工作区模式会把每个未跟踪文件的内容塞进提示词，未跟踪文件多的仓库会超出 Codex 输入上限 | 有基准分支就走分支模式；没有就数未跟踪文件，超过 3 个自动改用只读 task 做 review |
 | 输出 | 原样 | 原样，只在最前面加一行 `STATUS:` |
+| 语言 | 英文 | 所有提示词和规则都是英文，不会强制 Codex 或 Claude 用某种语言回复 |
 
 ## 安装
 
@@ -96,13 +97,13 @@ Claude 派给 codex-worker 的内容长这样。头部几行是控制参数，�
 MODE: implement
 EFFORT: high
 
-## 目标
+## Goal
 ...
-## 背景
+## Context
 ...
-## 约束
+## Constraints
 ...
-## 验收
+## Acceptance
 ...
 ```
 

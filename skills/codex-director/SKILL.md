@@ -1,108 +1,108 @@
 ---
 name: codex-director
-description: 让 Codex 当默认执行者、Claude 只当导演的工作法。凡是要读代码理解现状、排查 bug 根因、按需求写实现、给改动做 review、要第二意见的任务，或用户说「派给 codex」「让 codex 看看」「用 codex」，都先加载本技能，按流程把活派给 codex-worker，自己只写任务书、判结果、做取舍。
+description: A way of working where Codex is the default executor and Claude only directs. Load this skill for any task that involves reading code to understand current behavior, finding the root cause of a bug, implementing a change from requirements, reviewing a diff, or getting a second opinion, and whenever the user says "ask codex", "let codex look", or "use codex". Follow the process to dispatch work to codex-worker; Claude only writes the brief, judges the result, and makes the calls.
 ---
 
-# Codex 导演模式
+# Codex director mode
 
-前提：Codex 的额度不设限，Claude 主线程的上下文和输出才是稀缺资源。所以：
+Premise: Codex quota is effectively unlimited. The scarce resource is the Claude main thread's context and output. Therefore:
 
-- **不为了理解代码去读文件。** 想知道「X 在哪处理」「为什么会这样」，写任务书派给 Codex，让它读完告诉你。
-- **不自己写大段实现。** 写清楚要什么，让 Codex 写，自己审。
-- **多派几路不心疼。** 同一件事可以同时派调查和实现两路，或让 Codex 出两种方案再选。
-- **自己只做四件事**：跟用户对话、拆任务写任务书、判断 Codex 结果、做取舍。
+- **Do not read files to understand code.** To learn "where is X handled" or "why does this happen", write a brief and dispatch it to Codex. Let Codex read and report back.
+- **Do not write large implementations yourself.** Specify what is needed, let Codex write it, and review.
+- **Dispatching several routes is fine.** Run investigation and implementation in parallel for the same problem, or have Codex propose two approaches and pick one.
+- **You do four things only**: talk to the user, break the task down and write briefs, judge Codex's results, and make the calls.
 
-## 派发方式
+## Dispatching
 
-用 Agent 工具派 `subagent_type: "codex-worker"`，`model` 显式写 `opus`（转发器只做拼命令和读文件，不需要主线程的模型）。多路任务放在同一条消息里并行派出，完成后会自动收到通知，不要轮询。
+Use the Agent tool with `subagent_type: "codex-worker"` and set `model` explicitly to `opus` (the forwarder only assembles commands and reads files; it does not need the main thread's model). Put parallel dispatches in a single message; you are notified automatically when each finishes. Do not poll.
 
-Codex 一个任务跑多久都行。codex-worker 把它放到 Bash 后台跑，没有时长上限；不要因为等得久就重派或改小任务。**codex-worker 会通知你两次**：第一次内容只有一行 `WAITING`，表示 Codex 已启动、还在跑，这条直接忽略，什么都不用做；第二次以 `STATUS:` 开头，才是结果。等待期间用户想看进度，运行 `/codex:status`，它列出本仓库正在跑和最近完成的 Codex 任务及当前阶段；`/codex:status <job-id>` 看单个任务的详细进度。
+A Codex task may run for any length of time. codex-worker runs it in the Bash background with no duration limit; do not re-dispatch or shrink the task because it is taking long. **codex-worker notifies you twice**: the first notification contains only the line `WAITING`, meaning Codex has started and is still running; ignore it and do nothing. The second starts with `STATUS:` and is the result. While waiting, the user can run `/codex:status` to list running and recently finished Codex jobs in this repo with their current phase, or `/codex:status <job-id>` for one job's details.
 
-prompt 格式：开头几行头部，空一行，然后任务书正文。
+Prompt format: a few header lines, a blank line, then the brief body.
 
 ```
 MODE: investigate
 EFFORT: xhigh
 
-<任务书>
+<brief>
 ```
 
-### MODE 与档位
+### MODE and effort
 
-| 想干什么 | MODE | EFFORT | 说明 |
+| Goal | MODE | EFFORT | Notes |
 |---|---|---|---|
-| 扫一遍代码库回答问题、定位入口 | investigate | medium | 快，够用 |
-| 追调用链、理清一块逻辑 | investigate | high | 缺省 |
-| 排查 bug 根因、诡异行为 | investigate | xhigh | 慢，但值得 |
-| 按需求写实现或打补丁 | implement | high | Codex 直接改工作区 |
-| 修 review 挑出的问题、接着上一轮干 | continue | 不传 | 头部加 `WRITE: yes` 才允许改文件 |
-| 常规代码 review | review | 不传 | 尽量给 `BASE: <ref>`，见下 |
-| 挑刺：质疑方案和假设 | adversarial-review | 不传 | 正文写关注点，尽量给 `BASE: <ref>` |
+| Scan the codebase to answer a question, locate entry points | investigate | medium | Fast, sufficient |
+| Trace call chains, understand a module | investigate | high | Default |
+| Find the root cause of a bug or odd behavior | investigate | xhigh | Slow, but worth it |
+| Implement a change or patch from requirements | implement | high | Codex edits the working tree directly |
+| Fix review findings, continue previous work | continue | unset | Only writes files with `WRITE: yes` in the header |
+| Standard code review | review | unset | Prefer providing `BASE: <ref>`, see below |
+| Challenge the approach and assumptions | adversarial-review | unset | Body is the focus text; prefer providing `BASE: <ref>` |
 
-xhigh 很慢，只在需要深挖时开。
+xhigh is slow. Use it only when depth is needed.
 
-### review 类要注意未跟踪文件
+### Review modes and untracked files
 
-插件在没有 `BASE` 时会走「工作区模式」，把仓库里每个未跟踪文件的内容都塞进提示词，未跟踪文件多的仓库会超出 Codex 输入上限而失败。两个办法：
+Without `BASE`, the plugin uses working-tree mode and inlines the content of every untracked file into the prompt. Repos with many untracked files exceed Codex's input limit and the review fails. Two options:
 
-- **首选**：改动先提交到分支，任务书头部给 `BASE: <基准分支>`，只比较已提交的 diff。
-- 没法提交时不用管，codex-worker 数到未跟踪文件超过 3 个会自动改用只读 task 做 review，并在返回里加一行 NOTE 说明。这时任务书正文里**列出本次改动的文件**，让 Codex 知道该看哪些。
+- **Preferred**: commit the change to a branch first and put `BASE: <base branch>` in the header so only the committed diff is compared.
+- If committing is not possible, do nothing special. codex-worker counts untracked files and, above 3, automatically falls back to a read-only task that performs the review, adding a NOTE line to its return. In that case **list the changed files in the brief body** so Codex knows what to look at.
 
-### 写文件的任务要隔离
+### Isolate tasks that write files
 
-同一个 checkout 里同时只能有一路 implement。要并行改（比如让 Codex 用两种方案各写一版），派 agent 时加 `isolation: "worktree"`，每路在自己的工作树里改，结束后由你比较、挑一版合回来。只读任务不用隔离。
+Only one `implement` per checkout at a time. To run parallel edits (for example, two approaches by Codex), dispatch the agent with `isolation: "worktree"` so each route edits its own worktree; compare afterwards and merge the one you pick. Read-only tasks need no isolation.
 
-## 任务书模板
+## Brief template
 
-任务书是给 Codex 看的，它没有你的对话上下文。写全，写具体。
+The brief is for Codex, which has none of your conversation context. Write it completely and concretely.
 
 ```
-## 目标
-一句话说清做成什么样。
+## Goal
+One sentence describing the finished state.
 
-## 背景
-用户原话里的关键信息；已知的入口文件、相关模块；之前试过什么、为什么不行。
+## Context
+Key facts from the user's words; known entry files and related modules; what was tried before and why it failed.
 
-## 约束
-- 不许动的东西（配置、公共接口、无关文件）
-- 代码风格：跟周围代码一致，最小改动，不顺手重构
-- 涉及外部系统的：只读不调用 / 允许调用，二选一写明
+## Constraints
+- Things not to touch (config, public interfaces, unrelated files)
+- Style: match surrounding code, minimal change, no incidental refactoring
+- External systems: state one of "read-only, do not call" or "calling is allowed"
 
-## 验收
-- 怎么算完成：哪个测试要过、哪个命令要能跑、要回答哪几个问题
-- 输出要求：结论 + 证据（文件:行号）+ 不确定的点单独列
+## Acceptance
+- What counts as done: which tests must pass, which command must run, which questions must be answered
+- Output requirements: conclusion + evidence (file:line) + uncertainties listed separately
 
-## 已知文件（可选）
-path/to/a.py  —— 入口
-path/to/b.py  —— 可疑
+## Known files (optional)
+path/to/a.py  -- entry point
+path/to/b.py  -- suspect
 ```
 
-## 标准流水线（改代码类任务）
+## Standard pipeline (code changes)
 
-1. 写任务书。需求含糊先问用户，别让 Codex 猜。
-2. 并行派两路：`implement` 写实现，`investigate` 只读梳理受影响范围。两边回来对照，看实现有没有漏掉调查发现的调用点。
-3. 实现回来后派 `adversarial-review`，正文写这次改动的意图和你最担心的点。
-4. review 有 high/medium 问题就派 `continue` + `WRITE: yes` 让 Codex 自己修，再 review。最多三轮，还不干净就自己介入。
-5. 收尾：跑测试或验证命令，抽查 Codex 给的一两处 `文件:行号` 是否属实，然后向用户汇报。
+1. Write the brief. If the requirement is ambiguous, ask the user first; do not let Codex guess.
+2. Dispatch two routes in parallel: `implement` to write the change and `investigate` (read-only) to map the affected area. Compare the results and check the implementation against the call sites the investigation found.
+3. When the implementation returns, dispatch `adversarial-review` with the intent of the change and your main concerns as the body.
+4. For high or medium findings, dispatch `continue` with `WRITE: yes` so Codex fixes them, then review again. At most three rounds; step in yourself if it is still not clean.
+5. Wrap up: run the tests or verification command, spot-check one or two `file:line` claims from Codex, then report to the user.
 
-只读类任务（回答问题、排查）：一路 investigate 就够，Codex 留了疑问或没做完时再派一路 continue 追问。
+Read-only tasks (questions, investigations): one `investigate` route is enough. If Codex left open questions or unfinished parts, dispatch one `continue` to follow up.
 
-## 不派给 Codex 的
+## What not to delegate to Codex
 
-- 需求还没定、要跟用户确认取舍的。
-- 操作线上环境的活（生产服务器、ssh 到远端、改运行中的服务配置）：Codex 可以帮读脚本、出方案，执行由你来。
-- 十行以内的小改动，写任务书比自己改还费事。
-- 跟用户对话。
-- **写文档和做 artifact（HTML 页面、报告、会话总结、README 之类给人看的产出）由你自己完成，不派给 Codex。** 需要的事实和素材可以先派 investigate 去查，成文由你来写。注意：这条只约束你的分工，不要写进给 Codex 的任务书里。Codex 在写代码过程中顺手改注释、README 或补个说明是它自己的事，不要额外加「不要写文档」之类的限制去干预它。
+- Requirements that are still undecided and need a trade-off confirmed with the user.
+- Operations on live environments (production servers, ssh to remote hosts, changing configuration of running services): Codex can read scripts and propose a plan, but you perform the execution.
+- Changes under about ten lines, where writing a brief costs more than making the edit.
+- Talking to the user.
+- **Writing documents and artifacts (HTML pages, reports, session summaries, READMEs and other human-facing output) is done by you, not Codex.** Dispatch `investigate` first if you need facts or material; write the document yourself. This rule constrains your division of labor only; do not write it into briefs. Codex updating comments, a README, or adding an explanation while coding is its own business; do not add restrictions such as "do not write documentation".
 
-## 会话变长时
+## When the session gets long
 
-上下文太长、开始遗忘早期信息时，运行 `/codex:transfer` 把整个会话转成 Codex 线程，把得到的 `codex resume <id>` 告诉用户，由用户决定在 Codex 里续做还是开新会话。
+When the context is long and early information starts getting lost, run `/codex:transfer` to turn the whole session into a Codex thread, give the user the resulting `codex resume <id>`, and let the user decide whether to continue in Codex or start a new session.
 
-## 拿到结果后
+## After receiving a result
 
-转发器返回的是 Codex 的原文，只在开头多一行 STATUS。
+The forwarder returns Codex's text verbatim with a single STATUS line prepended.
 
-- 相信里面的 `文件:行号` 前先抽查一两处，Codex 也会错。
-- `STATUS: failed` 或 `CODEX_FAILED`：把日志里最有用的几行报给用户，不要自己接手重做整个任务。
-- review 挑出的问题不要自动全修，先判断哪些是真问题。
+- Spot-check one or two `file:line` references before trusting them; Codex is also wrong sometimes.
+- On `STATUS: failed` or `CODEX_FAILED`: report the most useful log lines to the user. Do not take over and redo the whole task yourself.
+- Do not auto-apply every review finding; decide first which ones are real.
