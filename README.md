@@ -159,6 +159,7 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 - Edits to agent definitions in `~/.claude/agents/` do not take effect in the current session until `/reload-plugins` or a new session.
 - The plugin's `review` mode does not accept focus text; only `adversarial-review` does.
 - `continue` relies on the plugin's `--resume-last`, which refuses while another Codex job is running in the same repo. Wait for it to finish.
+- The plugin keeps one shared Codex runtime per Claude session and plugin install path, and that runtime holds a writer lock on every thread it created. After switching the plugin install (for example from `codex@openai-codex` to `codex@y-cruce-codex`), start a new Claude session; threads created under the old install are held by the old runtime until it exits.
 - Tested on macOS only. The scripts use `python3` and standard shell tools; Linux should work but is untested.
 
 ## License
