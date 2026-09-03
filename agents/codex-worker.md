@@ -18,6 +18,7 @@ MODEL: <model name>                   (optional; omitted by default)
 BASE: <git ref>                       (optional; review modes only)
 WRITE: yes                            (optional; continue only; allows file edits when continuing)
 THREAD: <codex thread id>             (optional; continue only; the thread that must be resumed)
+CWD: <absolute path>                  (optional; run Codex in this repository instead of the current directory)
 
 <brief body>
 ```
@@ -37,6 +38,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/codex-worker.XXXXXX")
 MODE=investigate               # fill: the MODE header
 BASE=""                        # fill: the BASE header, or leave empty
 THREAD=""                      # fill: the THREAD header, or leave empty
+CWD="${CWD:-$PWD}"             # fill: the CWD header, or leave this line as is
 cat > "$WORK/brief.md" <<'PROMPT'
 <paste the brief body here exactly as received>
 PROMPT
@@ -44,26 +46,26 @@ PROMPT
 case "$MODE" in
   investigate)
     cp "$WORK/brief.md" "$WORK/prompt.md"
-    CMD=(node "$CC" task --prompt-file "$WORK/prompt.md" --effort high) ;;          # fill: replace high if EFFORT is set
+    CMD=(node "$CC" task --cwd "$CWD" --prompt-file "$WORK/prompt.md" --effort high) ;;          # fill: replace high if EFFORT is set
   implement)
     cp "$WORK/brief.md" "$WORK/prompt.md"
-    CMD=(node "$CC" task --prompt-file "$WORK/prompt.md" --effort high --write) ;;  # fill: replace high if EFFORT is set
+    CMD=(node "$CC" task --cwd "$CWD" --prompt-file "$WORK/prompt.md" --effort high --write) ;;  # fill: replace high if EFFORT is set
   continue)
     cp "$WORK/brief.md" "$WORK/prompt.md"
-    CAND=$(node "$CC" task-resume-candidate --json 2>/dev/null | python3 -c 'import json,sys; print(((json.load(sys.stdin).get("candidate") or {}).get("threadId")) or "")')
+    CAND=$(node "$CC" task-resume-candidate --cwd "$CWD" --json 2>/dev/null | python3 -c 'import json,sys; print(((json.load(sys.stdin).get("candidate") or {}).get("threadId")) or "")')
     if [ -n "$THREAD" ] && [ "$CAND" != "$THREAD" ]; then
       echo "THREAD_MISMATCH: requested $THREAD but the plugin can only resume its most recent task thread in this repo, which is ${CAND:-none}. Dispatch a fresh task instead, or continue without THREAD." > "$WORK/note"
       CMD=(false)
     else
-      CMD=(node "$CC" task --resume-last --prompt-file "$WORK/prompt.md")           # fill: append --write if the header has WRITE: yes
+      CMD=(node "$CC" task --cwd "$CWD" --resume-last --prompt-file "$WORK/prompt.md")           # fill: append --write if the header has WRITE: yes
     fi ;;
   review|adversarial-review)
     FOCUS=""
     [ "$MODE" = adversarial-review ] && FOCUS="$(tr '\n' ' ' < "$WORK/brief.md")"
     if [ -n "$BASE" ]; then
-      CMD=(node "$CC" "$MODE" --wait --scope branch --base "$BASE" ${FOCUS:+"$FOCUS"})
-    elif [ "$(git ls-files --others --exclude-standard | wc -l)" -le 3 ]; then
-      CMD=(node "$CC" "$MODE" --wait ${FOCUS:+"$FOCUS"})
+      CMD=(node "$CC" "$MODE" --cwd "$CWD" --wait --scope branch --base "$BASE" ${FOCUS:+"$FOCUS"})
+    elif [ "$(git -C "$CWD" ls-files --others --exclude-standard | wc -l)" -le 3 ]; then
+      CMD=(node "$CC" "$MODE" --cwd "$CWD" --wait ${FOCUS:+"$FOCUS"})
     else
       {
         echo 'You are performing a code review. The working tree contains many untracked files; do not treat them as part of this change.'
@@ -74,7 +76,7 @@ case "$MODE" in
         echo; echo '---- Brief ----'; cat "$WORK/brief.md"
       } > "$WORK/prompt.md"
       echo 'NOTE: too many untracked files; fell back to a read-only task for this review' > "$WORK/note"
-      CMD=(node "$CC" task --prompt-file "$WORK/prompt.md" --effort high)
+      CMD=(node "$CC" task --cwd "$CWD" --prompt-file "$WORK/prompt.md" --effort high)
     fi ;;
 esac
 # fill: if the MODEL header is set, add a line here:  CMD+=(--model <value>)   (write spark as gpt-5.3-codex-spark)
