@@ -16,7 +16,7 @@ Premise: Codex quota is effectively unlimited. The scarce resource is the Claude
 
 Use the Agent tool with `subagent_type: "codex-worker"` and set `model` explicitly to `opus` (the forwarder only assembles commands and reads files; it does not need the main thread's model). Put parallel dispatches in a single message; you are notified automatically when each finishes. Do not poll.
 
-A Codex task may run for any length of time. codex-worker runs it in the Bash background with no duration limit; do not re-dispatch or shrink the task because it is taking long. **codex-worker notifies you twice**: the first notification contains only the line `WAITING`, meaning Codex has started and is still running; ignore it and do nothing. The second starts with `STATUS:` and is the result. While waiting, the user can run `/codex:status` to list running and recently finished Codex jobs in this repo with their current phase, or `/codex:status <job-id>` for one job's details.
+A Codex task may run for any length of time. codex-worker stays alive until Codex finishes and returns once, with the result starting with a `STATUS:` line; do not re-dispatch or shrink the task because it is taking long. While waiting, the user can run `/codex:status` to list running and recently finished Codex jobs in this repo with their current phase, or `/codex:status <job-id>` for one job's details.
 
 Prompt format: a few header lines, a blank line, then the brief body. Add `CWD: <absolute path>` when Codex must run in a repository other than the current directory (codex-worker inherits your working directory otherwise).
 

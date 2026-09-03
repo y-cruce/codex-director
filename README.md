@@ -31,9 +31,8 @@ sequenceDiagram
         C->>W: MODE: implement
         C->>W: MODE: investigate
     end
-    W->>X: starts codex-companion task in the background
-    W-->>C: WAITING (suspended)
-    X-->>W: process exits, worker wakes
+    W->>X: starts codex-companion task detached
+    W->>W: waits in foreground Bash calls until Codex exits
     W-->>C: STATUS: done + Codex output verbatim
     C->>W: MODE: adversarial-review
     W->>X: review
@@ -147,7 +146,7 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 
 **Parallel writes use worktrees.** Only one `implement` runs per checkout at a time. To have Codex produce two approaches, dispatch the agent with `isolation: "worktree"` so each works in its own tree, and Claude picks one.
 
-**Background start, suspend, wake.** Claude Code's Bash tool allows at most 10 minutes per foreground call. The forwarder starts Codex with `run_in_background`, then ends its turn and waits to be woken. This is the wait mechanism Claude Code provides; it costs nothing regardless of duration.
+**Detached start, foreground wait.** Claude Code's Bash tool allows at most 10 minutes per foreground call, and a subagent that ends its turn is reported as finished, so it cannot simply suspend and be woken later. The forwarder therefore starts Codex as a detached process and then waits for it in foreground Bash calls of under 10 minutes each, repeated as often as needed. Its turn ends only when the result is in hand, so the dispatcher receives exactly one return.
 
 **Decision logic lives in shell, not in the model's judgment.** For review modes, the choice between branch mode, working-tree mode, and the fallback is a fixed script. The forwarder fills in MODE, BASE, and the body, nothing else.
 
@@ -157,7 +156,7 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 
 ## Known limitations
 
-- After starting Codex, the forwarder sends the main thread one notification containing only `WAITING`; the real result arrives when Codex exits. The skill tells Claude to ignore the first one.
+- Each wait round is a Bash call of about 9.5 minutes; a long Codex run therefore shows up as several consecutive wait calls in the forwarder's transcript. That is expected.
 - Edits to agent definitions in `~/.claude/agents/` do not take effect in the current session until `/reload-plugins` or a new session.
 - The plugin's `review` mode does not accept focus text; only `adversarial-review` does.
 - `continue` relies on the plugin's `--resume-last`, which refuses while another Codex job is running in the same repo. Wait for it to finish.

@@ -31,9 +31,8 @@ sequenceDiagram
         C->>W: MODE: implement
         C->>W: MODE: investigate
     end
-    W->>X: 后台启动 codex-companion task
-    W-->>C: WAITING（挂起等待）
-    X-->>W: 进程退出，唤醒
+    W->>X: 以脱离进程方式启动 codex-companion task
+    W->>W: 在前台 Bash 调用里循环等待 Codex 退出
     W-->>C: STATUS: done + Codex 原文
     C->>W: MODE: adversarial-review
     W->>X: review
@@ -147,7 +146,7 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 **并行改文件用 worktree。** 同一个 checkout 里同时只跑一路 `implement`。要让 Codex 用两种方案各写一版，派 agent 时加 `isolation: "worktree"`，各改各的，Claude 最后挑。
 
-**后台启动、挂起、唤醒。** Claude Code 的 Bash 工具前台调用最多 10 分钟。转发器用 `run_in_background` 启动 Codex，然后结束自己的回合等唤醒。这是 Claude Code 提供的等法，等多久都不占用任何东西。
+**脱离启动、前台等待。** Claude Code 的 Bash 工具前台调用最多 10 分钟，而子 agent 一旦结束回合就会被判为「已完成」，没法挂起后再被唤醒。所以转发器把 Codex 作为脱离进程启动，然后用一次不到 10 分钟的前台 Bash 调用循环等它退出，等多少轮都行。拿到结果后才结束回合，主线程只会收到一次返回。
 
 **判断逻辑写进 shell，不靠模型自觉。** review 类任务的分支模式 / 工作区模式 / 兜底三选一，写成了固定脚本，转发器只填 MODE、BASE、正文三处。
 
@@ -157,7 +156,7 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 ## 已知限制
 
-- 转发器启动 Codex 后会先给主线程发一条只有 `WAITING` 的通知，Codex 跑完后再发真正的结果。技能里已写明忽略第一条。
+- 每轮等待是一次约 9.5 分钟的 Bash 调用，Codex 跑得久时转发器的记录里会连续出现多次等待调用，属正常现象。
 - 改了 `~/.claude/agents/` 里的 agent 定义，同一会话不会立刻生效，要 `/reload-plugins` 或重开会话。
 - 官方插件的 `review` 模式不接受关注点文本，只有 `adversarial-review` 接受。
 - `continue` 依赖官方插件的 `--resume-last`，同仓库有别的 Codex 任务在跑时它会拒绝，等跑完再派。
