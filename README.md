@@ -143,7 +143,7 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 
 **Codex output is never compressed.** The forwarder returns Codex's stdout unchanged. Claude's context is saved by the division of labor itself (Claude does not read files or write code), not by truncating or summarizing Codex's answer.
 
-**One thread per problem, review only when it earns its cost.** For code changes, `implement` runs first (or `investigate` then `continue` with the implementation when the affected area is unclear). When the implementation comes back, Claude decides whether to run `adversarial-review`: yes for changes touching concurrency, persistence, auth, external calls, or several modules, or when Codex reported uncertainties; no for small, local, mechanical changes with passing tests. Findings go back to the same thread via `continue` to fix, up to three rounds.
+**One thread per problem, review only when it earns its cost.** For code changes, `implement` runs first (or `investigate` then `continue` with the implementation when the affected area is unclear). When the implementation comes back, Claude judges whether an `adversarial-review` is worth its cost for this particular change and says so either way. Findings go back to the same thread via `continue` to fix, up to three rounds.
 
 **Parallel writes use worktrees.** Only one `implement` runs per checkout at a time. To have Codex produce two approaches, dispatch the agent with `isolation: "worktree"` so each works in its own tree, and Claude picks one.
 
