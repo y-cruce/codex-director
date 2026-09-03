@@ -46,7 +46,7 @@ sequenceDiagram
 
 ## 和官方 Codex 插件的关系
 
-依赖 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)，所有对 Codex 的调用都走它的 `codex-companion.mjs` 脚本。本仓库不改插件，只在外面加一层分工规则和一个转发 agent。
+依赖 Claude Code 的 Codex 插件，所有对 Codex 的调用都走它的 `codex-companion.mjs` 脚本。推荐装 [y-cruce/codex-plugin-cc](https://github.com/y-cruce/codex-plugin-cc)，它是 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) 的 fork，只多了 `task --thread <id>`（已提交上游 [#719](https://github.com/openai/codex-plugin-cc/pull/719)），其他没改。本仓库只在插件外面加一层分工规则和一个转发 agent。
 
 官方插件自带的 `codex:codex-rescue` 也是转发器，区别在下面几点：
 
@@ -65,7 +65,15 @@ sequenceDiagram
 
 1. Claude Code（验证过 2.1.259）
 2. Codex CLI 已安装并登录（验证过 0.152.1）：`npm install -g @openai/codex && codex login`
-3. 官方 Codex 插件已装（验证过 1.0.6）：在 Claude Code 里执行 `/plugin install codex@openai-codex`，然后 `/codex:setup` 确认状态是 ready
+3. Claude Code 的 Codex 插件，从官方插件的 fork 安装：[y-cruce/codex-plugin-cc](https://github.com/y-cruce/codex-plugin-cc)。内容是上游 1.0.6 加上 `task --thread <id>`（已提交上游 [openai/codex-plugin-cc#719](https://github.com/openai/codex-plugin-cc/pull/719)），codex-director 靠它做到一个问题一个 Codex 线程。在终端执行：
+
+   ```bash
+   claude plugin uninstall codex@openai-codex   # 装过官方版才需要
+   claude plugin marketplace add y-cruce/codex-plugin-cc
+   claude plugin install codex@y-cruce-codex
+   ```
+
+   然后在 Claude Code 里执行 `/codex:setup` 确认状态是 ready。官方插件也能用，只是没有 `--thread`，codex-worker 只能续最近一个线程（见「线程连续性」）。
 
 安装本仓库：
 

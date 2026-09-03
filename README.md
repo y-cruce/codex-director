@@ -46,7 +46,7 @@ sequenceDiagram
 
 ## Relationship to the official Codex plugin
 
-This depends on [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc). Every call to Codex goes through its `codex-companion.mjs` script. Nothing in the plugin is modified; this repo adds a layer of delegation rules and one forwarding agent on top.
+This depends on the Codex plugin for Claude Code. Every call to Codex goes through its `codex-companion.mjs` script. The recommended install is [y-cruce/codex-plugin-cc](https://github.com/y-cruce/codex-plugin-cc), a fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) that adds `task --thread <id>` (submitted upstream as [#719](https://github.com/openai/codex-plugin-cc/pull/719)); nothing else in the plugin is changed. This repo adds a layer of delegation rules and one forwarding agent on top.
 
 The plugin ships its own forwarder, `codex:codex-rescue`. The differences:
 
@@ -65,7 +65,15 @@ Prerequisites:
 
 1. Claude Code (tested with 2.1.259)
 2. Codex CLI installed and logged in (tested with 0.152.1): `npm install -g @openai/codex && codex login`
-3. The official Codex plugin (tested with 1.0.6): run `/plugin install codex@openai-codex` in Claude Code, then `/codex:setup` and confirm it reports ready
+3. The Codex plugin for Claude Code, installed from this fork of the official plugin: [y-cruce/codex-plugin-cc](https://github.com/y-cruce/codex-plugin-cc). It is upstream 1.0.6 plus `task --thread <id>` ([openai/codex-plugin-cc#719](https://github.com/openai/codex-plugin-cc/pull/719)), which codex-director needs to keep one Codex thread per problem. In a terminal:
+
+   ```bash
+   claude plugin uninstall codex@openai-codex   # only if the official one is installed
+   claude plugin marketplace add y-cruce/codex-plugin-cc
+   claude plugin install codex@y-cruce-codex
+   ```
+
+   Then run `/codex:setup` in Claude Code and confirm it reports ready. The official plugin also works, but without `--thread` codex-worker can only resume the most recent thread (see "Thread continuity").
 
 Install this repo:
 

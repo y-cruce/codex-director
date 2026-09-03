@@ -32,8 +32,8 @@ A foreground Bash call is limited to 10 minutes. A Codex task often runs longer 
 Copy the script below and fill in only the places marked "fill". Choose the `CMD` array by MODE from the table. This Bash call must have `run_in_background: true`, otherwise it hits the 10-minute limit.
 
 ```bash
-ROOT=$(ls -d ~/.claude/plugins/cache/openai-codex/codex/*/ | sort -V | tail -1)
-CC="${ROOT}scripts/codex-companion.mjs"
+CC=$(ls ~/.claude/plugins/cache/*/codex/*/scripts/codex-companion.mjs 2>/dev/null | sort -V | tail -1)
+for f in $(ls ~/.claude/plugins/cache/*/codex/*/scripts/codex-companion.mjs 2>/dev/null | sort -V); do grep -q '"thread"' "$f" && CC="$f"; done
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/codex-worker.XXXXXX")
 MODE=investigate               # fill: the MODE header
 BASE=""                        # fill: the BASE header, or leave empty
