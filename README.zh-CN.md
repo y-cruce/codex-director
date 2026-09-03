@@ -115,7 +115,17 @@ EFFORT: high
 | `review` | 官方 review | 不会 |
 | `adversarial-review` | 挑刺式 review，正文写关注点 | 不会 |
 
-可选头部：`EFFORT`（`medium` / `high` / `xhigh`，缺省 high）、`MODEL`（缺省用你 Codex 配置里的模型）、`BASE`（review 类的基准分支）。
+可选头部：`EFFORT`（`medium` / `high` / `xhigh`，缺省 high）、`MODEL`（缺省用你 Codex 配置里的模型）、`BASE`（review 类的基准分支）、`THREAD`（`continue` 必须续上的 Codex 线程）。
+
+### 线程连续性
+
+Codex 的上下文窗口很大，一个线程会记住它读过的所有代码。同一个问题的后续追问放在同一个线程里，又快又准，所以技能按**一个问题一个 Codex 线程**来管：
+
+- 每次 task 类结果都带回一行 `THREAD: <id>`。
+- 同一个问题之后的所有派发（继续调查、追问、按调查结果实现、修 review 问题）都用 `MODE: continue`，头部带上这个 `THREAD:`。
+- codex-worker 会核对请求的线程和插件即将续的线程是否一致，不一致就报 `THREAD_MISMATCH`，不会悄悄续到错的线程上。
+
+插件带来的限制：它只能续当前 Claude 会话在这个仓库里最近一个跑完的 task 线程。一个问题进行中时，Claude 不会在两次 `continue` 之间往这个仓库派其他 task 类任务。
 
 ### 看进度
 
@@ -125,7 +135,7 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 **Codex 输出不压缩。** 转发器把 Codex 的 stdout 一字不动带回主线程。省 Claude 上下文的手段只有分工本身（Claude 不读文件、不写代码），不靠截断或摘要 Codex 的回答。
 
-**多派几路。** 改代码类任务默认并行派 `implement` 和 `investigate` 两路，实现回来后再派 `adversarial-review`，有问题让 Codex 用 `continue` 自己修，最多三轮。Claude 只在循环卡住或需要取舍时介入。
+**一个问题一个线程，review 循环在线程内跑。** 改代码类任务先派 `implement`（改动范围不清楚时先 `investigate`，再在同一线程里 `continue` 做实现），实现回来后派 `adversarial-review`，有问题让 Codex 在同一线程里用 `continue` 自己修，最多三轮。Claude 只在循环卡住或需要取舍时介入。
 
 **并行改文件用 worktree。** 同一个 checkout 里同时只跑一路 `implement`。要让 Codex 用两种方案各写一版，派 agent 时加 `isolation: "worktree"`，各改各的，Claude 最后挑。
 

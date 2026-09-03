@@ -115,7 +115,17 @@ EFFORT: high
 | `review` | The plugin's standard review | No |
 | `adversarial-review` | Challenge-style review; the body is the focus text | No |
 
-Optional headers: `EFFORT` (`medium` / `high` / `xhigh`, default high), `MODEL` (defaults to the model in your Codex config), `BASE` (base ref for review modes).
+Optional headers: `EFFORT` (`medium` / `high` / `xhigh`, default high), `MODEL` (defaults to the model in your Codex config), `BASE` (base ref for review modes), `THREAD` (the Codex thread a `continue` must resume).
+
+### Thread continuity
+
+Codex has a very large context window, and a thread keeps everything Codex has read so far. Follow-ups on the same problem are faster and more accurate inside the same thread, so the skill keeps **one Codex thread per problem**:
+
+- Every task result comes back with a `THREAD: <id>` line.
+- Any later dispatch about the same problem (more investigation, a follow-up question, implementing what was found, fixing review findings) uses `MODE: continue` with that `THREAD:` in the header.
+- codex-worker checks the requested thread against the one the plugin is about to resume and refuses with `THREAD_MISMATCH` rather than silently continuing the wrong thread.
+
+Constraint inherited from the plugin: it can only resume the most recent finished task thread of the current Claude session in the repo. While a problem is in progress, Claude does not start other task-class jobs in that repo between two `continue` calls.
 
 ### Checking progress
 
@@ -125,7 +135,7 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 
 **Codex output is never compressed.** The forwarder returns Codex's stdout unchanged. Claude's context is saved by the division of labor itself (Claude does not read files or write code), not by truncating or summarizing Codex's answer.
 
-**Dispatch more than one route.** For code changes, `implement` and `investigate` run in parallel by default. When the implementation comes back, `adversarial-review` runs on it. Findings go back to Codex via `continue` to fix, up to three rounds. Claude steps in only when the loop stalls or a judgment call is needed.
+**One thread per problem, review loop inside it.** For code changes, `implement` runs first (or `investigate` then `continue` with the implementation when the affected area is unclear). When the implementation comes back, `adversarial-review` runs on it. Findings go back to the same thread via `continue` to fix, up to three rounds. Claude steps in only when the loop stalls or a judgment call is needed.
 
 **Parallel writes use worktrees.** Only one `implement` runs per checkout at a time. To have Codex produce two approaches, dispatch the agent with `isolation: "worktree"` so each works in its own tree, and Claude picks one.
 

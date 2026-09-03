@@ -17,6 +17,7 @@ EFFORT: medium | high | xhigh        (optional; defaults below)
 MODEL: <model name>                   (optional; omitted by default)
 BASE: <git ref>                       (optional; review modes only)
 WRITE: yes                            (optional; continue only; allows file edits when continuing)
+THREAD: <codex thread id>             (optional; continue only; the thread that must be resumed)
 
 <brief body>
 ```
@@ -35,6 +36,7 @@ CC="${ROOT}scripts/codex-companion.mjs"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/codex-worker.XXXXXX")
 MODE=investigate               # fill: the MODE header
 BASE=""                        # fill: the BASE header, or leave empty
+THREAD=""                      # fill: the THREAD header, or leave empty
 cat > "$WORK/brief.md" <<'PROMPT'
 <paste the brief body here exactly as received>
 PROMPT
@@ -48,7 +50,13 @@ case "$MODE" in
     CMD=(node "$CC" task --prompt-file "$WORK/prompt.md" --effort high --write) ;;  # fill: replace high if EFFORT is set
   continue)
     cp "$WORK/brief.md" "$WORK/prompt.md"
-    CMD=(node "$CC" task --resume-last --prompt-file "$WORK/prompt.md") ;;          # fill: append --write if the header has WRITE: yes
+    CAND=$(node "$CC" task-resume-candidate --json 2>/dev/null | python3 -c 'import json,sys; print(((json.load(sys.stdin).get("candidate") or {}).get("threadId")) or "")')
+    if [ -n "$THREAD" ] && [ "$CAND" != "$THREAD" ]; then
+      echo "THREAD_MISMATCH: requested $THREAD but the plugin can only resume its most recent task thread in this repo, which is ${CAND:-none}. Dispatch a fresh task instead, or continue without THREAD." > "$WORK/note"
+      CMD=(false)
+    else
+      CMD=(node "$CC" task --resume-last --prompt-file "$WORK/prompt.md")           # fill: append --write if the header has WRITE: yes
+    fi ;;
   review|adversarial-review)
     FOCUS=""
     [ "$MODE" = adversarial-review ] && FOCUS="$(tr '\n' ' ' < "$WORK/brief.md")"
@@ -79,6 +87,7 @@ echo "EXIT=$?"
 Notes:
 - The review-mode decision is fixed in the script (branch mode when BASE is set; otherwise count untracked files and, above 3, fall back to a read-only task). Do not change that logic. The reason: in working-tree mode the plugin inlines the content of every untracked file into the prompt, and repos with many untracked files exceed Codex's input limit.
 - `review` mode does not accept focus text. The script already handles this; do not add it by hand.
+- `continue` can only resume the most recent finished task thread of this Claude session in this repo (the plugin offers nothing else). When the THREAD header is set, the script checks it against that candidate and refuses on mismatch instead of silently continuing the wrong thread.
 
 After issuing the step 1 Bash call, your turn ends. Output exactly one line, `WAITING`, and nothing else. The dispatcher reads that line as "Codex has started and is still running" and keeps waiting.
 
@@ -89,6 +98,7 @@ You are notified when the step 1 background command exits. Fill in the WORK path
 ```bash
 WORK=<fill: the WORK path printed by step 1>
 [ -s "$WORK/out.txt" ] && echo "STATUS: done" || echo "STATUS: failed"
+T=$(grep -o 'Thread ready ([^)]*)' "$WORK/log" 2>/dev/null | tail -1 | sed 's/Thread ready (\(.*\))/\1/'); [ -n "$T" ] && echo "THREAD: $T"
 [ -f "$WORK/note" ] && cat "$WORK/note"
 cat "$WORK/out.txt"
 [ -s "$WORK/out.txt" ] || { echo '--- CODEX_FAILED, last 20 log lines:'; tail -20 "$WORK/log"; }

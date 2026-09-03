@@ -35,7 +35,7 @@ EFFORT: xhigh
 | Trace call chains, understand a module | investigate | high | Default |
 | Find the root cause of a bug or odd behavior | investigate | xhigh | Slow, but worth it |
 | Implement a change or patch from requirements | implement | high | Codex edits the working tree directly |
-| Fix review findings, continue previous work | continue | unset | Only writes files with `WRITE: yes` in the header |
+| Any follow-up on a problem that already has a thread | continue | unset | Put `THREAD: <id>` in the header; writes files only with `WRITE: yes` |
 | Standard code review | review | unset | Prefer providing `BASE: <ref>`, see below |
 | Challenge the approach and assumptions | adversarial-review | unset | Body is the focus text; prefer providing `BASE: <ref>` |
 
@@ -47,6 +47,20 @@ Without `BASE`, the plugin uses working-tree mode and inlines the content of eve
 
 - **Preferred**: commit the change to a branch first and put `BASE: <base branch>` in the header so only the committed diff is compared.
 - If committing is not possible, do nothing special. codex-worker counts untracked files and, above 3, automatically falls back to a read-only task that performs the review, adding a NOTE line to its return. In that case **list the changed files in the brief body** so Codex knows what to look at.
+
+### Thread continuity: keep one Codex thread per problem
+
+Codex has a very large context window, and a thread keeps everything Codex has read and concluded so far. Follow-ups on the same problem are faster and more accurate when they land in the same thread, so **once a problem has a thread, every later dispatch about that problem uses `continue`**: further investigation, follow-up questions, implementing what the investigation found, and fixing review findings. Start a fresh `investigate` or `implement` only for a different problem, or when the thread has clearly gone wrong.
+
+How it works:
+
+- Every task-class result comes back with a `THREAD: <id>` line. Remember it together with the problem it belongs to.
+- Put `THREAD: <id>` in the header of every `continue` for that problem. codex-worker verifies that this is the thread the plugin is about to resume and refuses with `THREAD_MISMATCH` otherwise, instead of silently continuing the wrong one.
+- The plugin can only resume the **most recent** finished task thread of this Claude session in this repo. So while a problem is in progress, do not dispatch other task-class jobs (`investigate`, `implement`, or a review that falls back to a task) in the same repo between two `continue` calls; the older thread becomes unresumable. Reviews that run in branch mode or working-tree mode are review-class and do not affect this.
+- `continue` is refused while another Codex task is running in the repo. Wait for it.
+- A `continue` brief can be short: state what changed since last time and what to do next. Codex already has the background.
+
+Parallel routes are therefore for independent problems or one-shot work, not for a problem you intend to keep iterating on.
 
 ### Isolate tasks that write files
 
@@ -80,12 +94,12 @@ path/to/b.py  -- suspect
 ## Standard pipeline (code changes)
 
 1. Write the brief. If the requirement is ambiguous, ask the user first; do not let Codex guess.
-2. Dispatch two routes in parallel: `implement` to write the change and `investigate` (read-only) to map the affected area. Compare the results and check the implementation against the call sites the investigation found.
-3. When the implementation returns, dispatch `adversarial-review` with the intent of the change and your main concerns as the body.
-4. For high or medium findings, dispatch `continue` with `WRITE: yes` so Codex fixes them, then review again. At most three rounds; step in yourself if it is still not clean.
+2. Dispatch `implement`. If the affected area is unclear, dispatch `investigate` first and then `continue` in that thread with the implementation (rather than a separate parallel route, so the thread keeps what it learned).
+3. When the implementation returns, dispatch `adversarial-review` with the intent of the change and your main concerns as the body (prefer `BASE:`; a fallback review is task-class and would become the most recent thread).
+4. For high or medium findings, dispatch `continue` with `THREAD:` and `WRITE: yes` so Codex fixes them in the same thread, then review again. At most three rounds; step in yourself if it is still not clean.
 5. Wrap up: run the tests or verification command, spot-check one or two `file:line` claims from Codex, then report to the user.
 
-Read-only tasks (questions, investigations): one `investigate` route is enough. If Codex left open questions or unfinished parts, dispatch one `continue` to follow up.
+Read-only tasks (questions, investigations): one `investigate` route is enough. Follow-up questions from the user about the same topic go to `continue` with the same `THREAD:`.
 
 ## What not to delegate to Codex
 
