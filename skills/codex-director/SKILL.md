@@ -55,12 +55,11 @@ Codex has a very large context window, and a thread keeps everything Codex has r
 How it works:
 
 - Every task-class result comes back with a `THREAD: <id>` line. Remember it together with the problem it belongs to.
-- Put `THREAD: <id>` in the header of every `continue` for that problem. codex-worker verifies that this is the thread the plugin is about to resume and refuses with `THREAD_MISMATCH` otherwise, instead of silently continuing the wrong one.
-- The plugin can only resume the **most recent** finished task thread of this Claude session in this repo. So while a problem is in progress, do not dispatch other task-class jobs (`investigate`, `implement`, or a review that falls back to a task) in the same repo between two `continue` calls; the older thread becomes unresumable. Reviews that run in branch mode or working-tree mode are review-class and do not affect this.
+- Put `THREAD: <id>` in the header of every `continue` for that problem. With a plugin that supports `task --thread` (see openai/codex-plugin-cc PR #719), codex-worker resumes exactly that thread, so several problems can be interleaved freely in one repo. With an older plugin, codex-worker verifies the thread against the one the plugin is about to resume and refuses with `THREAD_MISMATCH` otherwise; in that case, while a problem is in progress, do not dispatch other task-class jobs (`investigate`, `implement`, or a review that falls back to a task) in the same repo between two `continue` calls, because only the most recent thread can be resumed. Reviews in branch or working-tree mode are review-class and do not affect this.
 - `continue` is refused while another Codex task is running in the repo. Wait for it.
 - A `continue` brief can be short: state what changed since last time and what to do next. Codex already has the background.
 
-Parallel routes are therefore for independent problems or one-shot work, not for a problem you intend to keep iterating on.
+On an older plugin, parallel routes are therefore for independent problems or one-shot work, not for a problem you intend to keep iterating on.
 
 ### Isolate tasks that write files
 

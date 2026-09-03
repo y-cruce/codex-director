@@ -125,7 +125,7 @@ Codex 的上下文窗口很大，一个线程会记住它读过的所有代码�
 - 同一个问题之后的所有派发（继续调查、追问、按调查结果实现、修 review 问题）都用 `MODE: continue`，头部带上这个 `THREAD:`。
 - codex-worker 会核对请求的线程和插件即将续的线程是否一致，不一致就报 `THREAD_MISMATCH`，不会悄悄续到错的线程上。
 
-插件带来的限制：它只能续当前 Claude 会话在这个仓库里最近一个跑完的 task 线程。一个问题进行中时，Claude 不会在两次 `continue` 之间往这个仓库派其他 task 类任务。
+插件支持 `task --thread <id>` 时（见 [openai/codex-plugin-cc#719](https://github.com/openai/codex-plugin-cc/pull/719)），codex-worker 精确续到指定线程，多个问题可以随意交错。旧版插件只能续当前 Claude 会话在这个仓库里最近一个跑完的 task 线程，codex-worker 会退回候选校验，Claude 也会避免在两次 `continue` 之间往这个仓库派其他 task 类任务。
 
 ### 看进度
 

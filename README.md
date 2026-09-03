@@ -125,7 +125,7 @@ Codex has a very large context window, and a thread keeps everything Codex has r
 - Any later dispatch about the same problem (more investigation, a follow-up question, implementing what was found, fixing review findings) uses `MODE: continue` with that `THREAD:` in the header.
 - codex-worker checks the requested thread against the one the plugin is about to resume and refuses with `THREAD_MISMATCH` rather than silently continuing the wrong thread.
 
-Constraint inherited from the plugin: it can only resume the most recent finished task thread of the current Claude session in the repo. While a problem is in progress, Claude does not start other task-class jobs in that repo between two `continue` calls.
+With a plugin that supports `task --thread <id>` ([openai/codex-plugin-cc#719](https://github.com/openai/codex-plugin-cc/pull/719)), codex-worker resumes exactly the requested thread, so problems can be interleaved freely. Older plugin versions can only resume the most recent finished task thread of the current Claude session in the repo; there codex-worker falls back to a candidate check, and Claude avoids starting other task-class jobs in that repo between two `continue` calls.
 
 ### Checking progress
 
