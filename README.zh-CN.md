@@ -143,7 +143,7 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 **Codex 输出不压缩。** 转发器把 Codex 的 stdout 一字不动带回主线程。省 Claude 上下文的手段只有分工本身（Claude 不读文件、不写代码），不靠截断或摘要 Codex 的回答。
 
-**一个问题一个线程，review 循环在线程内跑。** 改代码类任务先派 `implement`（改动范围不清楚时先 `investigate`，再在同一线程里 `continue` 做实现），实现回来后派 `adversarial-review`，有问题让 Codex 在同一线程里用 `continue` 自己修，最多三轮。Claude 只在循环卡住或需要取舍时介入。
+**一个问题一个线程，review 只在值得时做。** 改代码类任务先派 `implement`（改动范围不清楚时先 `investigate`，再在同一线程里 `continue` 做实现）。实现回来后由 Claude 判断要不要派 `adversarial-review`：涉及并发、持久化、权限、外部调用、跨多个模块，或 Codex 报告里有不确定项的要审；小而局部、机械性、测试已过的不审。有问题让 Codex 在同一线程里用 `continue` 自己修，最多三轮。
 
 **并行改文件用 worktree。** 同一个 checkout 里同时只跑一路 `implement`。要让 Codex 用两种方案各写一版，派 agent 时加 `isolation: "worktree"`，各改各的，Claude 最后挑。
 

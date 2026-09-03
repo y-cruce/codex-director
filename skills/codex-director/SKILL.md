@@ -94,8 +94,14 @@ path/to/b.py  -- suspect
 
 1. Write the brief. If the requirement is ambiguous, ask the user first; do not let Codex guess.
 2. Dispatch `implement`. If the affected area is unclear, dispatch `investigate` first and then `continue` in that thread with the implementation (rather than a separate parallel route, so the thread keeps what it learned).
-3. When the implementation returns, dispatch `adversarial-review` with the intent of the change and your main concerns as the body (prefer `BASE:`; a fallback review is task-class and would become the most recent thread).
-4. For high or medium findings, dispatch `continue` with `THREAD:` and `WRITE: yes` so Codex fixes them in the same thread, then review again. At most three rounds; step in yourself if it is still not clean.
+3. When the implementation returns, **decide whether a review is worth it**. Review is not a fixed step; it is your call, made on the returned result. Dispatch `adversarial-review` (intent of the change and your main concerns as the body; prefer `BASE:`, since a fallback review is task-class and would become the most recent thread) when any of these hold:
+   - The change touches concurrency, ordering, retries, persistence, migrations, auth or permissions, money, or calls to external systems.
+   - It spans several modules, or is large enough that you cannot spot-check it in a few minutes.
+   - Codex reported uncertainties, skipped or could not run tests, or deviated from the brief.
+   - It lands on a production-critical path, or the user asked for a review.
+
+   Skip the review and go straight to wrap-up when the change is small and local, the tests Codex ran cover it and pass, its report has no open questions, and the change is mechanical (a rename, a config value, logging, a well-understood one-place fix). Tell the user in one line that you skipped the review and why.
+4. If you reviewed: for high or medium findings, dispatch `continue` with `THREAD:` and `WRITE: yes` so Codex fixes them in the same thread, then judge again whether another review round is needed. At most three rounds; step in yourself if it is still not clean.
 5. Wrap up: run the tests or verification command, spot-check one or two `file:line` claims from Codex, then report to the user.
 
 Read-only tasks (questions, investigations): one `investigate` route is enough. Follow-up questions from the user about the same topic go to `continue` with the same `THREAD:`.
