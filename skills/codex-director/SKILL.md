@@ -7,7 +7,7 @@ description: A way of working where Codex is the default executor and Claude onl
 
 Premise: Codex quota is effectively unlimited. The scarce resource is the Claude main thread's context and output. Therefore:
 
-- **Do not read files to understand code.** To learn "where is X handled" or "why does this happen", write a brief and dispatch it to Codex. Let Codex read and report back.
+- **Do not read files to understand code.** To learn "where is X handled" or "why does this happen", write a brief and dispatch it to Codex. Let Codex read and report back. (Trivial lookups are the exception; see "What not to delegate".)
 - **Do not write large implementations yourself.** Specify what is needed, let Codex write it, and review.
 - **Dispatching several routes is fine.** Run investigation and implementation in parallel for the same problem, or have Codex propose two approaches and pick one.
 - **You do four things only**: talk to the user, break the task down and write briefs, judge Codex's results, and make the calls.
@@ -102,9 +102,10 @@ Read-only tasks (questions, investigations): one `investigate` route is enough. 
 
 ## What not to delegate to Codex
 
+**Simple tasks: do them yourself.** Delegating costs a brief, a dispatch, and a wait of at least a minute. If you can finish the task in about three tool calls without needing to understand unfamiliar code, delegating is slower than doing it. Examples: looking up one value in a file you already know, a single grep, a one-line or few-line fix at a known location, renaming, editing a config entry, running a command and reporting its output, answering from what is already in the conversation. Dispatch Codex only when the task needs reading or writing code beyond that.
+
 - Requirements that are still undecided and need a trade-off confirmed with the user.
 - Operations on live environments (production servers, ssh to remote hosts, changing configuration of running services): Codex can read scripts and propose a plan, but you perform the execution.
-- Changes under about ten lines, where writing a brief costs more than making the edit.
 - Talking to the user.
 - **Writing documents and artifacts (HTML pages, reports, session summaries, READMEs and other human-facing output) is done by you, not Codex.** Dispatch `investigate` first if you need facts or material; write the document yourself. This rule constrains your division of labor only; do not write it into briefs. Codex updating comments, a README, or adding an explanation while coding is its own business; do not add restrictions such as "do not write documentation".
 
