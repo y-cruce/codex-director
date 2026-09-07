@@ -146,7 +146,7 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 
 **Parallel writes use worktrees.** Only one `implement` runs per checkout at a time. To have Codex produce two approaches, dispatch the agent with `isolation: "worktree"` so each works in its own tree, and Claude picks one.
 
-**Detached start, foreground wait.** Claude Code's Bash tool allows at most 10 minutes per foreground call, and a subagent that ends its turn is reported as finished, so it cannot simply suspend and be woken later. The forwarder therefore starts Codex as a detached process and then waits for it in foreground Bash calls of under 10 minutes each, repeated as often as needed. Its turn ends only when the result is in hand, so the dispatcher receives exactly one return.
+**Detached start, bounded waits.** Task runs use native background jobs and foreground `status --wait` calls of under 10 minutes. The worker returns on completion or a structured question; after a question, the director answers and collects that same job. Reviews and older plugins retain the detached-process wait loop.
 
 **Decision logic lives in shell, not in the model's judgment.** For review modes, the choice between branch mode, working-tree mode, and the fallback is a fixed script. The forwarder fills in MODE, BASE, and the body, nothing else.
 
@@ -159,9 +159,17 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 - Each wait round is a Bash call of about 9.5 minutes; a long Codex run therefore shows up as several consecutive wait calls in the forwarder's transcript. That is expected.
 - Edits to agent definitions in `~/.claude/agents/` do not take effect in the current session until `/reload-plugins` or a new session.
 - The plugin's `review` mode does not accept focus text; only `adversarial-review` does.
-- `continue` relies on the plugin's `--resume-last`, which refuses while another Codex job is running in the same repo. Wait for it to finish.
+- `continue` starts a later turn. For an active task use `message` or `answer`; older plugins without live controls must wait for completion.
 - The plugin keeps one shared Codex runtime per Claude session and plugin install path, and that runtime holds a writer lock on every thread it created. After switching the plugin install (for example from `codex@openai-codex` to `codex@y-cruce-codex`), start a new Claude session; threads created under the old install are held by the old runtime until it exits.
 - Tested on macOS only. The scripts use `python3` and standard shell tools; Linux should work but is untested.
+
+## Live Corrections and Answers
+
+With a plugin version supporting live controls, `/codex:message <job-id> <text>` appends input to the running turn. Add `--interrupt` to cancel that turn and continue the same job and thread with the new direction. Existing edits remain and write permissions do not change. Acceptance means queued for a later model request, not that the instruction has already been followed.
+
+For a structured question, the worker returns `STATUS: waiting-for-answer`, the job ID, and questions while Codex remains active. The director supplies an answers-map JSON file, such as `{"source":{"answers":["Use the latest plan."]}}`, through `/codex:answer <job-id> --request-id <id> --answers-file <path>`, then waits on the same job and collects its result. Questions time out after 10 minutes. `/codex:status <job-id>` exposes pending messages, questions, and interruption state.
+
+Native next-turn queues are distinct from these mid-turn controls. Update the installed plugin and restart the Claude session to use the new broker; editing this checkout does not update installed copies.
 
 ## License
 

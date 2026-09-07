@@ -138,6 +138,14 @@ Codex 的上下文窗口很大，一个线程会记住它读过的所有代码�
 
 Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最近完成的任务及当前阶段。`/codex:result <job-id>` 看某次的完整输出。
 
+### 运行中纠偏与回答
+
+使用支持实时控制的插件版本时，`/codex:message <job-id> <补充指令>` 会向当前轮追加消息，不必等整轮结束。加 `--interrupt` 会取消当前轮，再由原任务在同一线程执行新指令；已有改动不会自动回滚，也不会改变原任务的写权限。返回的 Git 状态包含原有改动，不能全部归因于 Codex。
+
+遇到结构化反问，worker 返回 `STATUS: waiting-for-answer`、`JOB:` 和问题，底层 Codex 仍在等待。主会话按问题 ID 写入回答 JSON，例如 `{"source":{"answers":["从方案中心读取最新方案"]}}`，再执行 `/codex:answer <job-id> --request-id <id> --answers-file <绝对路径>`。随后对同一任务执行 `status --wait`，完成后取 `result`，不重新派单。默认等待回答 10 分钟，超时会中断并报告。
+
+`status <job-id>` 可以查看待消费消息、问题和中断状态。消息被接受不代表模型已经执行；原生“下一轮排队”与这里的中途纠偏不同。本次插件修改不会自动更新已安装副本；更新插件后重开 Claude 会话，使新 broker 生效。
+
 ## 设计上的几个决定
 
 **Codex 输出不压缩。** 转发器把 Codex 的 stdout 一字不动带回主线程。省 Claude 上下文的手段只有分工本身（Claude 不读文件、不写代码），不靠截断或摘要 Codex 的回答。
@@ -146,7 +154,7 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 **并行改文件用 worktree。** 同一个 checkout 里同时只跑一路 `implement`。要让 Codex 用两种方案各写一版，派 agent 时加 `isolation: "worktree"`，各改各的，Claude 最后挑。
 
-**脱离启动、前台等待。** Claude Code 的 Bash 工具前台调用最多 10 分钟，而子 agent 一旦结束回合就会被判为「已完成」，没法挂起后再被唤醒。所以转发器把 Codex 作为脱离进程启动，然后用一次不到 10 分钟的前台 Bash 调用循环等它退出，等多少轮都行。拿到结果后才结束回合，主线程只会收到一次返回。
+**后台启动、有界等待。** task 类任务使用插件原生后台任务，通过不到 10 分钟的 `status --wait` 调用等待结果。完成或出现结构化反问时 worker 返回；反问由主会话回答后继续等待同一任务。review 和旧插件保留脱离进程的等待循环。
 
 **判断逻辑写进 shell，不靠模型自觉。** review 类任务的分支模式 / 工作区模式 / 兜底三选一，写成了固定脚本，转发器只填 MODE、BASE、正文三处。
 
@@ -159,7 +167,7 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 - 每轮等待是一次约 9.5 分钟的 Bash 调用，Codex 跑得久时转发器的记录里会连续出现多次等待调用，属正常现象。
 - 改了 `~/.claude/agents/` 里的 agent 定义，同一会话不会立刻生效，要 `/reload-plugins` 或重开会话。
 - 官方插件的 `review` 模式不接受关注点文本，只有 `adversarial-review` 接受。
-- `continue` 依赖官方插件的 `--resume-last`，同仓库有别的 Codex 任务在跑时它会拒绝，等跑完再派。
+- `continue` 用于上一任务结束后的续接；运行中使用 `message` 或 `answer`，不支持实时控制的旧插件仍需等任务结束。
 - 插件按「Claude 会话 + 插件安装路径」各起一个共享的 Codex 运行时，它创建过的线程都被它持有写锁。换过插件安装来源之后（比如从 `codex@openai-codex` 换到 `codex@y-cruce-codex`），要重开 Claude 会话；旧安装下创建的线程在旧运行时退出前续不上。
 - 只在 macOS 上验证过。脚本用 `python3` 和标准 shell 工具，Linux 应该能用，没测。
 

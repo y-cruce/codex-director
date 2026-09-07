@@ -16,7 +16,7 @@ Premise: Codex quota is effectively unlimited. The scarce resource is the Claude
 
 Use the Agent tool with `subagent_type: "codex-worker"` and set `model` explicitly to `opus` (the forwarder only assembles commands and reads files; it does not need the main thread's model). Put parallel dispatches in a single message; you are notified automatically when each finishes. Do not poll.
 
-A Codex task may run for any length of time. codex-worker stays alive until Codex finishes and returns once, with the result starting with a `STATUS:` line; do not re-dispatch or shrink the task because it is taking long. While waiting, the user can run `/codex:status` to list running and recently finished Codex jobs in this repo with their current phase, or `/codex:status <job-id>` for one job's details.
+A Codex task may run for any length of time. codex-worker waits until completion or a structured question, returning a `STATUS:` line and, on current plugins, a `JOB:` ID. Do not re-dispatch because it is taking long. `/codex:status` lists jobs and `/codex:status <job-id>` shows pending messages, questions, and interruption state.
 
 Prompt format: a few header lines, a blank line, then the brief body. Add `CWD: <absolute path>` when Codex must run in a repository other than the current directory (codex-worker inherits your working directory otherwise).
 
@@ -61,10 +61,22 @@ How it works:
 
 - Every task-class result comes back with a `THREAD: <id>` line. Remember it together with the problem it belongs to.
 - Put `THREAD: <id>` in the header of every `continue` for that problem. With a plugin that supports `task --thread` (see openai/codex-plugin-cc PR #719), codex-worker resumes exactly that thread, so several problems can be interleaved freely in one repo. With an older plugin, codex-worker verifies the thread against the one the plugin is about to resume and refuses with `THREAD_MISMATCH` otherwise; in that case, while a problem is in progress, do not dispatch other task-class jobs (`investigate`, `implement`, or a review that falls back to a task) in the same repo between two `continue` calls, because only the most recent thread can be resumed. Reviews in branch or working-tree mode are review-class and do not affect this.
-- `continue` is refused while another Codex task is running in the repo. Wait for it.
+- `continue` starts a later turn after the previous job finishes. While the job is still running, use the live controls below instead of dispatching another task.
 - A `continue` brief can be short: state what changed since last time and what to do next. Codex already has the background.
 
 On an older plugin, parallel routes are therefore for independent problems or one-shot work, not for a problem you intend to keep iterating on.
+
+### Live corrections and questions
+
+The slash commands below are user-facing shorthand. For automatic coordination, call the corresponding `message`, `answer`, `status`, or `result` subcommand through Bash on the same selected `codex-companion.mjs`, with `--cwd` set to the job's repository. Do not invoke these commands as skills.
+
+Keep the job ID with its repository and thread. With a running task, send new context immediately using `/codex:message <job-id> <text>` (or the same `message` subcommand on the selected `codex-companion.mjs`). Use `--prompt-file` for multiline text. A successful response means accepted for the next model request, not that the instruction has already been followed.
+
+Use `/codex:message <job-id> --interrupt <text>` when the current approach must stop. It cancels the turn and continues the same job and thread with the new instruction, retaining its original write permission. Report the returned partial changes; interruption does not undo files. Do not use this to escalate a read-only task's permissions.
+
+On `STATUS: waiting-for-answer`, the Codex job remains running. Read the returned questions. Answer from already established facts, or ask the user when a choice or authorization is missing. Never infer permission from a factual answer. Write an answers-map JSON file, for example `{"source":{"answers":["Use the latest plan center result."]}}`, and call `/codex:answer <job-id> --request-id <id> --answers-file <path>`. Do not send an ordinary message to answer a structured request.
+
+After answering, use `status <job-id> --wait` on the same companion to wait for completion or another question, then `result <job-id>` to collect output. This is coordination, not another implementation dispatch. Questions time out after 10 minutes by default and interrupt the turn; report that outcome without inventing an answer. Ordinary prose questions that already ended a turn still use `continue` in the same thread. Old plugins without `message` require an update; do not pretend that live delivery succeeded.
 
 ### Isolate tasks that write files
 
