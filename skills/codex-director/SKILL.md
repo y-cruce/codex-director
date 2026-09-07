@@ -22,24 +22,29 @@ Prompt format: a few header lines, a blank line, then the brief body. Add `CWD: 
 
 ```
 MODE: investigate
-EFFORT: xhigh
+EFFORT: high
 
 <brief>
 ```
 
 ### MODE and effort
 
+Codex runs on `gpt-6-astra` by default (set in `~/.codex/config.toml`, together with a default effort of `high`). On this model, **medium or high is enough for nearly every task**; do not set `MODEL` unless the user asks for a specific model.
+
 | Goal | MODE | EFFORT | Notes |
 |---|---|---|---|
-| Scan the codebase to answer a question, locate entry points | investigate | medium | Fast, sufficient |
-| Trace call chains, understand a module | investigate | high | Default |
-| Find the root cause of a bug or odd behavior | investigate | xhigh | Slow, but worth it |
-| Implement a change or patch from requirements | implement | high | Codex edits the working tree directly |
+| Scan the codebase to answer a question, locate entry points, small well-scoped edits | investigate / implement | medium | Fast; the default for anything narrow |
+| Trace call chains, understand a module, implement a change from requirements | investigate / implement | high | The default for anything that spans several files |
+| Find the root cause of a bug or odd behavior | investigate | high | Start here; escalate to xhigh only if the high round comes back inconclusive |
 | Any follow-up on a problem that already has a thread | continue | unset | Put `THREAD: <id>` in the header; writes files only with `WRITE: yes` |
 | Standard code review | review | unset | Prefer providing `BASE: <ref>`, see below |
 | Challenge the approach and assumptions | adversarial-review | unset | Body is the focus text; prefer providing `BASE: <ref>` |
 
-xhigh is slow. Use it only when depth is needed.
+Picking the effort:
+
+- **medium**: the answer lives in one or two files, or the edit is a few lines at a known location and you only delegate because the code is unfamiliar.
+- **high**: everything else. Multi-file investigation, implementation from requirements, first root-cause pass.
+- **xhigh**: reserved. Use it only when a `high` round already ran and came back without a clear answer, or the problem is known to be non-deterministic (concurrency, ordering, intermittent failures) and needs long reasoning over many interacting paths. Do not start a task at xhigh; when escalating, prefer `continue` in the same thread with `EFFORT: xhigh` in the header so Codex keeps what it already read.
 
 ### Review modes and untracked files
 

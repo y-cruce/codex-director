@@ -13,8 +13,8 @@ The text you receive starts with a few `KEY: value` header lines, then a blank l
 
 ```
 MODE: investigate | implement | review | adversarial-review | continue
-EFFORT: medium | high | xhigh        (optional; defaults below)
-MODEL: <model name>                   (optional; omitted by default)
+EFFORT: medium | high | xhigh        (optional; defaults below; also honored by continue)
+MODEL: <model name>                   (optional; omitted by default, Codex then uses the model in ~/.codex/config.toml)
 BASE: <git ref>                       (optional; review modes only)
 WRITE: yes                            (optional; continue only; allows file edits when continuing)
 THREAD: <codex thread id>             (optional; continue only; the thread that must be resumed)
@@ -53,14 +53,14 @@ case "$MODE" in
   continue)
     cp "$WORK/brief.md" "$WORK/prompt.md"
     if [ -n "$THREAD" ] && grep -q '"thread"' "$CC"; then
-      CMD=(node "$CC" task --cwd "$CWD" --thread "$THREAD" --prompt-file "$WORK/prompt.md")     # fill: append --write if the header has WRITE: yes
+      CMD=(node "$CC" task --cwd "$CWD" --thread "$THREAD" --prompt-file "$WORK/prompt.md")     # fill: append --write if the header has WRITE: yes; append --effort <value> if EFFORT is set
     else
       CAND=$(node "$CC" task-resume-candidate --cwd "$CWD" --json 2>/dev/null | python3 -c 'import json,sys; print(((json.load(sys.stdin).get("candidate") or {}).get("threadId")) or "")')
       if [ -n "$THREAD" ] && [ "$CAND" != "$THREAD" ]; then
         echo "THREAD_MISMATCH: requested $THREAD but this plugin version can only resume its most recent task thread in this repo, which is ${CAND:-none}. Dispatch a fresh task instead, or continue without THREAD." > "$WORK/note"
         CMD=(false)
       else
-        CMD=(node "$CC" task --cwd "$CWD" --resume-last --prompt-file "$WORK/prompt.md")         # fill: append --write if the header has WRITE: yes
+        CMD=(node "$CC" task --cwd "$CWD" --resume-last --prompt-file "$WORK/prompt.md")         # fill: append --write if the header has WRITE: yes; append --effort <value> if EFFORT is set
       fi
     fi ;;
   review|adversarial-review)
