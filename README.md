@@ -8,12 +8,13 @@ Use it when you run both Claude Code and Codex (ChatGPT subscription), Claude's 
 
 ## What it consists of
 
-Two files and one config snippet:
+Three files and one config snippet:
 
 | File | Purpose |
 |---|---|
 | `skills/codex-director/SKILL.md` | Working rules for the Claude main thread: what to delegate, how to write a brief, how to run things in parallel, how the review loop works |
-| `agents/codex-worker.md` | A subagent with only the Bash tool. It takes a brief, calls the official Codex plugin's script, runs Codex in the background, and returns the output unchanged |
+| `agents/codex-worker.md` | A subagent with only the Bash tool. It writes the brief to a file, calls the worker script, and returns the output unchanged |
+| `skills/codex-director/scripts/codex-worker.sh` | The worker's shell logic: picks the Codex command by MODE, prepends the director note, starts Codex through the plugin's `codex-companion.mjs`, waits, collects; also streams job events for the director's monitor |
 | `docs/claude-md-snippet.md` | A routing rule for `CLAUDE.md` so that matching tasks always go through this path |
 
 Flow:
@@ -82,7 +83,7 @@ cd codex-director
 ./install.sh
 ```
 
-The script copies the agent and the skill into `~/.claude/`. Then append the snippet from `docs/claude-md-snippet.md` to `~/.claude/CLAUDE.md` and run `/reload-plugins` in Claude Code, or start a new session.
+The script copies the agent, the skill, and the worker script into `~/.claude/`. Then append the snippet from `docs/claude-md-snippet.md` to `~/.claude/CLAUDE.md` and run `/reload-plugins` in Claude Code, or start a new session.
 
 ## Usage
 
@@ -121,8 +122,9 @@ EFFORT: high
 | `continue` | Continue the previous Codex thread | Only with `WRITE: yes` in the header |
 | `review` | The plugin's standard review | No |
 | `adversarial-review` | Challenge-style review; the body is the focus text | No |
+| `wait` | Keep waiting on a running job (`JOB:` header); fallback when the event monitor is not available | No |
 
-Optional headers: `EFFORT` (`medium` / `high` / `xhigh`, default high), `MODEL` (defaults to the model in your Codex config), `BASE` (base ref for review modes), `THREAD` (the Codex thread a `continue` must resume).
+Optional headers: `EFFORT` (`medium` / `high` / `xhigh`, default high), `MODEL` (defaults to the model in your Codex config), `BASE` (base ref for review modes), `THREAD` (the Codex thread a `continue` must resume), `SIBLINGS` (one line naming other running Codex tasks, shown to Codex), `WAIT: no` (return right after launch; used with the event monitor), `CWD` (repository to run in).
 
 ### Thread continuity
 
@@ -148,7 +150,7 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 
 **Detached start, bounded waits.** Task runs use native background jobs and foreground `status --wait` calls of under 10 minutes. The worker returns on completion or a structured question; after a question, the director answers and collects that same job. Reviews and older plugins retain the detached-process wait loop.
 
-**Decision logic lives in shell, not in the model's judgment.** For review modes, the choice between branch mode, working-tree mode, and the fallback is a fixed script. The forwarder fills in MODE, BASE, and the body, nothing else.
+**Decision logic lives in shell, not in the model's judgment.** For review modes, the choice between branch mode, working-tree mode, and the fallback is a fixed script. The forwarder pastes its input into a file and calls `codex-worker.sh`; it fills in nothing.
 
 **Simple tasks are not delegated.** Anything Claude can finish in about three tool calls without understanding unfamiliar code (a lookup, a grep, a few-line fix at a known place, running a command) is done directly; a dispatch costs a brief and at least a minute of waiting.
 
@@ -156,7 +158,7 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 
 ## Known limitations
 
-- Each wait round is a Bash call of about 9.5 minutes; a long Codex run therefore shows up as several consecutive wait calls in the forwarder's transcript. That is expected.
+- Without the event monitor, each wait round is a Bash call of about 9.5 minutes; a long Codex run therefore shows up as several consecutive wait calls in the forwarder's transcript. That is expected.
 - Edits to agent definitions in `~/.claude/agents/` do not take effect in the current session until `/reload-plugins` or a new session.
 - The plugin's `review` mode does not accept focus text; only `adversarial-review` does.
 - `continue` starts a later turn. For an active task use `message` or `answer`; older plugins without live controls must wait for completion.
@@ -167,7 +169,13 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 
 With a plugin version supporting live controls, `/codex:message <job-id> <text>` appends input to the running turn. Add `--interrupt` to cancel that turn and continue the same job and thread with the new direction. Existing edits remain and write permissions do not change. Acceptance means queued for a later model request, not that the instruction has already been followed.
 
-For a structured question, the worker returns `STATUS: waiting-for-answer`, the job ID, and questions while Codex remains active. The director supplies an answers-map JSON file, such as `{"source":{"answers":["Use the latest plan."]}}`, through `/codex:answer <job-id> --request-id <id> --answers-file <path>`, then waits on the same job and collects its result. Questions time out after 10 minutes. `/codex:status <job-id>` exposes pending messages, questions, and interruption state.
+For a structured question, the director receives `STATUS: waiting-for-answer` (from a waiting worker) or a `QUESTION` event (from the monitor, see below) while Codex remains active. It supplies an answers-map JSON file, such as `{"source":{"answers":["Use the latest plan."]}}`, through `/codex:answer <job-id> --request-id <id> --answers-file <path>`. Without the monitor it then dispatches the worker again with `MODE: wait` and `JOB: <job-id>` to keep waiting on the same job. Questions time out after 10 minutes. `/codex:status <job-id>` exposes pending messages, questions, notifications, and interruption state.
+
+**Event monitor instead of waiting workers.** On plugins with the `events` subcommand, the director arms one persistent Claude Code Monitor per repository running `codex-worker.sh events --cwd <repo>`, and dispatches workers with `WAIT: no` so they return right after launch. Each job event then lands in the director's conversation as one line: `DONE`, `FAILED`, `QUESTION`, or `NOTIFIED`. No subagent round trip per event, no 9.5-minute rounds, one channel for all jobs. The waiting worker and `MODE: wait` remain the fallback for older plugins.
+
+Codex knows who started it. For `investigate` and `implement`, the worker script prepends a short note to the brief: Codex was started by a director agent rather than a human, `request_user_input` questions go to the director, other Codex tasks may be running (listed from the director's `SIBLINGS:` header) and Codex must not coordinate with them itself. On plugins that expose the `notify_director` tool, Codex can also send the director a one-line note without stopping; it arrives as a `NOTIFIED` event or as `STATUS: notified` from a waiting worker while the job keeps running. Codex tasks never talk to each other; the director relays.
+
+The worker agent itself is a thin wrapper: it writes its input to a file and calls `skills/codex-director/scripts/codex-worker.sh` (`launch`, `wait`, `collect`). All command selection, review fallbacks, and the director note live in that script, so the agent's context stays small and the logic can be tested with `bash -n` and a stub companion.
 
 Native next-turn queues are distinct from these mid-turn controls. Update the installed plugin and restart the Claude session to use the new broker; editing this checkout does not update installed copies.
 

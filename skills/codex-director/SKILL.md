@@ -16,9 +16,21 @@ Premise: Codex quota is effectively unlimited. The scarce resource is the Claude
 
 Use the Agent tool with `subagent_type: "codex-worker"` and set `model` explicitly to `opus` (the forwarder only assembles commands and reads files; it does not need the main thread's model). Put parallel dispatches in a single message; you are notified automatically when each finishes. Do not poll.
 
-A Codex task may run for any length of time. codex-worker waits until completion or a structured question, returning a `STATUS:` line and, on current plugins, a `JOB:` ID. Do not re-dispatch because it is taking long. `/codex:status` lists jobs and `/codex:status <job-id>` shows pending messages, questions, and interruption state.
+A Codex task may run for any length of time. Do not re-dispatch because it is taking long. `/codex:status` lists jobs and `/codex:status <job-id>` shows pending messages, questions, notifications, and interruption state. All shell logic of the worker lives in `~/.claude/skills/codex-director/scripts/codex-worker.sh`; you call that script yourself only for `companion` (print the selected `codex-companion.mjs`) and `events` (below).
 
-Prompt format: a few header lines, a blank line, then the brief body. Add `CWD: <absolute path>` when Codex must run in a repository other than the current directory (codex-worker inherits your working directory otherwise).
+### Waiting: one event monitor per session
+
+Preferred, on plugins whose companion has the `events` subcommand (check once per session: `grep -q 'case "events":' "$(bash ~/.claude/skills/codex-director/scripts/codex-worker.sh companion)"`):
+
+1. Before the first dispatch into a repository, arm one Monitor with `persistent: true` and the command `bash ~/.claude/skills/codex-director/scripts/codex-worker.sh events --cwd <repo>` (description: "Codex job events in <repo>"). One monitor per repository; it lives until the session ends.
+2. Dispatch codex-worker with `WAIT: no` in the header. It returns `STATUS: started`, `JOB:`, and `THREAD:` (possibly empty) within seconds and frees the main thread.
+3. Each line the monitor emits is one event and arrives on its own schedule; it is not user input. Lines: `DONE job=<id> thread=<id>`, `FAILED job=<id> thread=<id> <reason>`, `QUESTION job=<id> request=<id> <first question>`, `NOTIFIED job=<id> thread=<id> <note>`, `STALLED job=<id> thread=<id> <n>m without progress`. On `DONE` run `node "$(bash ~/.claude/skills/codex-director/scripts/codex-worker.sh companion)" result <job-id> --cwd <repo>` in a foreground Bash call and judge the output as usual. On `QUESTION` run `status <job-id> --cwd <repo> --json` on the same companion to read the questions, then answer (below). On `NOTIFIED` react (below). On `STALLED`, or when an active job has produced no event for about 15 minutes, run `status <job-id>` at once and look at the owner process and the time of the last progress entry; a job whose owner has exited is dead even if the store still says running, so report it and re-dispatch instead of waiting. Never let a silent job sit unchecked for an hour. Nothing else needs re-dispatching; the monitor keeps reporting.
+
+Sandbox: every Codex task runs without a sandbox (full read/write access and network), which is the user's standing policy; codex-worker passes `--sandbox danger-full-access` unless the header says otherwise. Read-only intent for `investigate` is stated in the brief, not enforced by the sandbox, so keep writing "read-only, do not modify files" into investigation briefs. `SANDBOX: network` (workspace-write plus network) or `SANDBOX: default` (the plugin's own read-only / workspace-write choice) narrow it for a single task; use them only when the user asks. On plugins without the `--sandbox` option the task runs in the plugin's default sandbox and cannot open sockets; a Codex report that tests could not run there is not a test failure.
+
+Fallback, when the plugin has no `events` or the Monitor tool is unavailable: dispatch without `WAIT: no`. The worker then waits in bounded rounds and returns `STATUS: done`, `waiting-for-answer`, or `notified`; after handling a question or note, dispatch `MODE: wait` with `JOB: <id>` to keep waiting. Never run both a monitor and a waiting worker on the same job: whichever collects a notification acknowledges it and the other never sees it.
+
+Prompt format: a few header lines, a blank line, then the brief body. Add `CWD: <absolute path>` when Codex must run in a repository other than the current directory (codex-worker inherits your working directory otherwise). Add `SIBLINGS: <one line>` when other Codex tasks you started are still running: name each with its job ID and a few words on what it does. codex-worker copies the line into the note it prepends for Codex (see "What Codex knows about you" below).
 
 ```
 MODE: investigate
@@ -37,6 +49,7 @@ Codex runs on `gpt-6-astra` by default (set in `~/.codex/config.toml`, together 
 | Trace call chains, understand a module, implement a change from requirements | investigate / implement | high | The default for anything that spans several files |
 | Find the root cause of a bug or odd behavior | investigate | high | Start here; escalate to xhigh only if the high round comes back inconclusive |
 | Any follow-up on a problem that already has a thread | continue | unset | Put `THREAD: <id>` in the header; writes files only with `WRITE: yes` |
+| Keep waiting on a running job after a question or notification (fallback without the event monitor) | wait | unset | Put `JOB: <id>` in the header; the body may be empty. Starts nothing |
 | Standard code review | review | unset | Prefer providing `BASE: <ref>`, see below |
 | Challenge the approach and assumptions | adversarial-review | unset | Body is the focus text; prefer providing `BASE: <ref>` |
 
@@ -76,7 +89,19 @@ Use `/codex:message <job-id> --interrupt <text>` when the current approach must 
 
 On `STATUS: waiting-for-answer`, the Codex job remains running. Read the returned questions. Answer from already established facts, or ask the user when a choice or authorization is missing. Never infer permission from a factual answer. Write an answers-map JSON file, for example `{"source":{"answers":["Use the latest plan center result."]}}`, and call `/codex:answer <job-id> --request-id <id> --answers-file <path>`. Do not send an ordinary message to answer a structured request.
 
-After answering, use `status <job-id> --wait` on the same companion to wait for completion or another question, then `result <job-id>` to collect output. This is coordination, not another implementation dispatch. Questions time out after 10 minutes by default and interrupt the turn; report that outcome without inventing an answer. Ordinary prose questions that already ended a turn still use `continue` in the same thread. Old plugins without `message` require an update; do not pretend that live delivery succeeded.
+After answering, with the event monitor armed there is nothing more to do; it reports the next event. Without it, dispatch codex-worker with `MODE: wait` and `JOB: <job-id>` (plus `CWD:` if the job runs elsewhere); it waits on the same job and returns done, another question, or a notification, collecting the result on done. This is coordination, not another implementation dispatch. Questions time out after 10 minutes by default and interrupt the turn; report that outcome without inventing an answer. Ordinary prose questions that already ended a turn still use `continue` in the same thread. Old plugins without `message` require an update; do not pretend that live delivery succeeded.
+
+### Notifications from Codex
+
+On plugins that expose the `notify_director` tool, Codex can send you a one-line note while it keeps working. It reaches you as a `NOTIFIED` event from the monitor, or as `STATUS: notified` from a waiting worker together with the `JOB:` and `THREAD:` lines and the notes; the job is still running either way. Read the note and decide: start parallel work that it makes possible (for example, a test-writing task once the root cause is known), send the job a `message` if the note changes what it should do, or do nothing. Without the monitor, dispatch `MODE: wait` with the same `JOB:` afterwards. Delivered notes are acknowledged and do not come back again; `/codex:status <job-id>` shows notes that have not been delivered yet. Codex is told to use the tool only for conclusions that change the plan, blockers, or a finished phase, so treat a note as worth reading, not as routine progress.
+
+### What Codex knows about you
+
+For `investigate` and `implement`, codex-worker prepends a fixed note to your brief: Codex was started by a director agent, not a human; `request_user_input` questions are addressed to you; `notify_director` exists (when the plugin supports it); other Codex tasks may be running and Codex must not coordinate with them itself but tell you instead. The `SIBLINGS:` header fills in the list of running tasks. Consequences for you:
+
+- Codex tasks never talk to each other. You are the only relay. When a new task overlaps the area of a running one, send the running job a one-line `message` saying what has started, and put the running job in the new task's `SIBLINGS:` line. Most dispatches need neither.
+- A `request_user_input` from Codex is a question to you. Answer from established facts; ask the user only for choices or authorization you do not have.
+- Do not repeat the note's content in the brief; write the brief as before.
 
 ### Isolate tasks that write files
 

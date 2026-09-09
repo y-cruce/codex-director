@@ -8,12 +8,13 @@
 
 ## 做了什么
 
-两个文件加一段配置：
+三个文件加一段配置：
 
 | 文件 | 作用 |
 |---|---|
 | `skills/codex-director/SKILL.md` | 给 Claude 主线程的工作规则：什么活派出去、任务书怎么写、并行怎么派、review 循环怎么跑 |
-| `agents/codex-worker.md` | 一个只有 Bash 工具的子 agent。收到任务书后调用官方 Codex 插件的脚本，把 Codex 放到后台跑，跑完把输出原样带回 |
+| `agents/codex-worker.md` | 一个只有 Bash 工具的子 agent。把任务书写进文件、调用 worker 脚本、把输出原样带回 |
+| `skills/codex-director/scripts/codex-worker.sh` | worker 的 shell 逻辑：按 MODE 选 Codex 命令、加上给 Codex 的调度者说明、通过插件的 `codex-companion.mjs` 启动、等待、收集；也给主会话的监视器输出任务事件 |
 | `docs/claude-md-snippet.md` | 加进 `CLAUDE.md` 的路由规则，保证相关任务每次都走这条路 |
 
 工作流程：
@@ -82,7 +83,7 @@ cd codex-director
 ./install.sh
 ```
 
-脚本把 agent 和 skill 复制到 `~/.claude/`。然后按 `docs/claude-md-snippet.md` 把路由规则加到 `~/.claude/CLAUDE.md`，在 Claude Code 里执行 `/reload-plugins` 或重开会话。
+脚本把 agent、skill 和 worker 脚本复制到 `~/.claude/`。然后按 `docs/claude-md-snippet.md` 把路由规则加到 `~/.claude/CLAUDE.md`，在 Claude Code 里执行 `/reload-plugins` 或重开会话。
 
 ## 使用
 
@@ -121,8 +122,9 @@ EFFORT: high
 | `continue` | 接着上一轮 Codex 的线程继续 | 头部有 `WRITE: yes` 才会 |
 | `review` | 官方 review | 不会 |
 | `adversarial-review` | 挑刺式 review，正文写关注点 | 不会 |
+| `wait` | 继续等一个正在跑的任务（头部 `JOB:`），没有事件监视器时的兜底 | 不会 |
 
-可选头部：`EFFORT`（`medium` / `high` / `xhigh`，缺省 high）、`MODEL`（缺省用你 Codex 配置里的模型）、`BASE`（review 类的基准分支）、`THREAD`（`continue` 必须续上的 Codex 线程）。
+可选头部：`EFFORT`（`medium` / `high` / `xhigh`，缺省 high）、`MODEL`（缺省用你 Codex 配置里的模型）、`BASE`（review 类的基准分支）、`THREAD`（`continue` 必须续上的 Codex 线程）、`SIBLINGS`（一行写明其他正在跑的 Codex 任务，会给 Codex 看）、`WAIT: no`（启动完就返回，配合事件监视器用）、`CWD`（在哪个仓库里跑）。
 
 ### 线程连续性
 
@@ -142,9 +144,15 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 使用支持实时控制的插件版本时，`/codex:message <job-id> <补充指令>` 会向当前轮追加消息，不必等整轮结束。加 `--interrupt` 会取消当前轮，再由原任务在同一线程执行新指令；已有改动不会自动回滚，也不会改变原任务的写权限。返回的 Git 状态包含原有改动，不能全部归因于 Codex。
 
-遇到结构化反问，worker 返回 `STATUS: waiting-for-answer`、`JOB:` 和问题，底层 Codex 仍在等待。主会话按问题 ID 写入回答 JSON，例如 `{"source":{"answers":["从方案中心读取最新方案"]}}`，再执行 `/codex:answer <job-id> --request-id <id> --answers-file <绝对路径>`。随后对同一任务执行 `status --wait`，完成后取 `result`，不重新派单。默认等待回答 10 分钟，超时会中断并报告。
+遇到结构化反问，主会话会收到 `STATUS: waiting-for-answer`（来自等待中的 worker）或一条 `QUESTION` 事件（来自下面说的监视器），底层 Codex 仍在等待。主会话按问题 ID 写入回答 JSON，例如 `{"source":{"answers":["从方案中心读取最新方案"]}}`，再执行 `/codex:answer <job-id> --request-id <id> --answers-file <绝对路径>`。没有监视器时，随后用 `MODE: wait` 加 `JOB: <job-id>` 再派一次 worker 继续等同一任务，不重新派单。默认等待回答 10 分钟，超时会中断并报告。
 
-`status <job-id>` 可以查看待消费消息、问题和中断状态。消息被接受不代表模型已经执行；原生“下一轮排队”与这里的中途纠偏不同。本次插件修改不会自动更新已安装副本；更新插件后重开 Claude 会话，使新 broker 生效。
+**用事件监视器代替等待的 worker。** 插件带 `events` 子命令时，主会话对每个仓库用 Claude Code 的 Monitor 工具常驻运行一次 `codex-worker.sh events --cwd <仓库>`，派 worker 时加 `WAIT: no`，worker 启动完就返回。之后每个任务事件都以一行文字直接进入主会话：`DONE`、`FAILED`、`QUESTION`、`NOTIFIED`。每个事件不再需要一次子 agent 往返，没有 9.5 分钟一轮的限制，所有任务共用一条通道。旧插件仍用等待的 worker 和 `MODE: wait` 兜底。
+
+Codex 知道自己是被谁启动的。`investigate` 和 `implement` 两种模式下，worker 脚本会在任务书前面加一段固定说明：你是由调度代理启动的，不是人类；`request_user_input` 的提问由调度代理回答；同一工作区可能还有其他 Codex 任务在跑（名单来自主会话派单时的 `SIBLINGS:` 头），不要自行协调，有事告诉调度代理。插件支持 `notify_director` 工具时，Codex 还可以在不停下来的情况下给调度代理发一句话，以 `NOTIFIED` 事件或 worker 的 `STATUS: notified` 送达，任务继续跑。Codex 任务之间不直接对话，全部由主会话中转。
+
+worker 这个 agent 本身只是一层薄壳：把收到的输入写进文件，调用 `skills/codex-director/scripts/codex-worker.sh` 的 `launch`、`wait`、`collect` 三个子命令。选哪条 Codex 命令、review 的兜底、给 Codex 的说明都在脚本里，agent 的上下文很小，脚本本身可以用 `bash -n` 和桩 companion 测试。
+
+`status <job-id>` 可以查看待消费消息、问题、通知和中断状态。消息被接受不代表模型已经执行；原生“下一轮排队”与这里的中途纠偏不同。本次插件修改不会自动更新已安装副本；更新插件后重开 Claude 会话，使新 broker 生效。
 
 ## 设计上的几个决定
 
@@ -154,9 +162,9 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 **并行改文件用 worktree。** 同一个 checkout 里同时只跑一路 `implement`。要让 Codex 用两种方案各写一版，派 agent 时加 `isolation: "worktree"`，各改各的，Claude 最后挑。
 
-**后台启动、有界等待。** task 类任务使用插件原生后台任务，通过不到 10 分钟的 `status --wait` 调用等待结果。完成或出现结构化反问时 worker 返回；反问由主会话回答后继续等待同一任务。review 和旧插件保留脱离进程的等待循环。
+**后台启动、有界等待。** task 类任务使用插件原生后台任务，通过不到 10 分钟的 `status --wait` 调用等待结果。完成、出现结构化反问或收到通知时 worker 返回；主会话处理后继续等待同一任务。插件支持 `events` 时改用事件监视器，worker 启动完即返回。review 和旧插件保留脱离进程的等待循环。
 
-**判断逻辑写进 shell，不靠模型自觉。** review 类任务的分支模式 / 工作区模式 / 兜底三选一，写成了固定脚本，转发器只填 MODE、BASE、正文三处。
+**判断逻辑写进 shell，不靠模型自觉。** review 类任务的分支模式 / 工作区模式 / 兜底三选一，写成了固定脚本，转发器只把收到的输入原样写进文件再调用 `codex-worker.sh`，自己什么都不填。
 
 **简单任务不委托。** Claude 三次工具调用以内、不需要理解陌生代码就能做完的事（查一个值、一次 grep、已知位置改几行、跑一条命令），直接自己做；派一次 Codex 要写任务书、还要等至少一分钟。
 
@@ -164,7 +172,7 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 ## 已知限制
 
-- 每轮等待是一次约 9.5 分钟的 Bash 调用，Codex 跑得久时转发器的记录里会连续出现多次等待调用，属正常现象。
+- 不用事件监视器时，每轮等待是一次约 9.5 分钟的 Bash 调用，Codex 跑得久时转发器的记录里会连续出现多次等待调用，属正常现象。
 - 改了 `~/.claude/agents/` 里的 agent 定义，同一会话不会立刻生效，要 `/reload-plugins` 或重开会话。
 - 官方插件的 `review` 模式不接受关注点文本，只有 `adversarial-review` 接受。
 - `continue` 用于上一任务结束后的续接；运行中使用 `message` 或 `answer`，不支持实时控制的旧插件仍需等任务结束。
