@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
-# Shell side of Codex dispatching. With the event monitor the director calls it directly:
+# Shell side of Codex dispatching, called by the director (Claude main thread) from Bash:
 #   codex-worker.sh dispatch [input-file]  read the brief from the file or stdin, start Codex, return at once with
 #                                          STATUS: started / JOB / THREAD (launch + collect in one call)
-# The codex-worker agent (fallback without the monitor) pastes its input into a file and calls:
-#   codex-worker.sh launch <input-file>   parse the header lines, start Codex, print WORK=... JOB=... STARTED
-#   codex-worker.sh wait <WORK>           one bounded wait (about 9.5 minutes); prints STILL_RUNNING | WAITING_FOR_ANSWER | NOTIFIED | DONE
-#   codex-worker.sh collect <WORK>        print the STATUS / JOB / THREAD lines and the payload
-# Used by the director directly:
-#   codex-worker.sh companion             print the selected codex-companion.mjs path
-#   codex-worker.sh events --cwd <repo>   stream job events (one line each) for a Monitor; needs a plugin with `events`
+#   codex-worker.sh events --cwd <repo>    stream job events (one line each) for a Monitor; needs a plugin with `events`
+#   codex-worker.sh companion              print the selected codex-companion.mjs path
+# Building blocks of dispatch, also usable on their own:
+#   codex-worker.sh launch <input-file>    parse the header lines, start Codex, print WORK=... JOB=... STARTED
+#   codex-worker.sh collect <WORK>         print the STATUS / JOB / THREAD lines
 #
 # Input file format: `KEY: value` header lines, a blank line, then the brief body.
-# Headers: MODE (investigate|implement|review|adversarial-review|continue|wait), EFFORT, MODEL, BASE, WRITE, THREAD,
-# JOB, SIBLINGS, CWD, WAIT (no = return right after launch), SANDBOX (full = no sandbox, the default for every task;
-# network = workspace-write plus network access; default = the plugin's own read-only / workspace-write choice).
+# Headers: MODE (investigate|implement|review|adversarial-review|continue), EFFORT, MODEL, BASE, WRITE, THREAD,
+# SIBLINGS, CWD, SANDBOX (full = no sandbox, the default for every task; network = workspace-write plus network
+# access; default = the plugin's own read-only / workspace-write choice).
 set -uo pipefail
 
 select_companion() {
@@ -29,13 +27,13 @@ select_companion() {
 # Reads $1 (the input file). Sets the header variables and writes the body to $WORK/brief.md.
 parse_input() {
   local line key val in_header=1
-  MODE=""; EFFORT=""; MODEL=""; BASE=""; WRITE=""; THREAD=""; JOB=""; SIBLINGS=""; CWD=""; WAIT=""; SANDBOX=""
+  MODE=""; EFFORT=""; MODEL=""; BASE=""; WRITE=""; THREAD=""; SIBLINGS=""; CWD=""; SANDBOX=""
   : > "$WORK/brief.md"
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "$in_header" = 1 ]; then
       if [ -z "$line" ]; then in_header=0; continue; fi
       case "$line" in
-        MODE:*|EFFORT:*|MODEL:*|BASE:*|WRITE:*|THREAD:*|JOB:*|SIBLINGS:*|CWD:*|WAIT:*|SANDBOX:*)
+        MODE:*|EFFORT:*|MODEL:*|BASE:*|WRITE:*|THREAD:*|SIBLINGS:*|CWD:*|SANDBOX:*)
           key=${line%%:*}; val=${line#*:}; val=${val#"${val%%[![:space:]]*}"}
           printf -v "$key" '%s' "$val" ;;
         *) in_header=0; printf '%s\n' "$line" >> "$WORK/brief.md" ;;
@@ -78,13 +76,8 @@ do_launch() {
   CC=$(select_companion)
   if [ -z "$CC" ]; then echo "CODEX_FAILED: no codex-companion.mjs found under ~/.claude/plugins/cache"; exit 1; fi
   parse_input "$input"
-  if [ -n "${LAUNCH_ONLY:-}" ]; then
-    WAIT=no
-    if [ "$MODE" = wait ]; then echo "CODEX_FAILED: dispatch does not take MODE: wait; the event monitor reports the job"; exit 1; fi
-  fi
   printf '%s\n' "$CC" > "$WORK/companion"
   printf '%s\n' "$CWD" > "$WORK/cwd"
-  printf '%s\n' "${WAIT:-yes}" > "$WORK/wait"
 
   local CMD=() FOCUS CAND
   case "$MODE" in
@@ -94,10 +87,6 @@ do_launch() {
     implement)
       { director_note; cat "$WORK/brief.md"; } > "$WORK/prompt.md"
       CMD=(node "$CC" task --cwd "$CWD" --prompt-file "$WORK/prompt.md" --effort "$(task_effort high)" --write) ;;
-    wait)
-      if [ -z "$JOB" ]; then echo "CODEX_FAILED: MODE: wait needs a JOB header"; exit 1; fi
-      printf '%s\n' "$JOB" > "$WORK/job"
-      echo "WORK=$WORK"; echo "JOB=$JOB"; echo "STARTED"; return ;;
     continue)
       cp "$WORK/brief.md" "$WORK/prompt.md"
       if [ -n "$THREAD" ] && grep -q '"thread"' "$CC"; then
@@ -166,65 +155,29 @@ do_launch() {
   echo "STARTED"
 }
 
-do_wait() {
-  WORK="$1"
-  if [ -f "$WORK/job" ]; then
-    node "$(cat "$WORK/companion")" status "$(cat "$WORK/job")" --cwd "$(cat "$WORK/cwd")" --wait --timeout-ms 540000 --json > "$WORK/status.json" || { echo "STATUS_FAILED"; cat "$WORK/status.json"; exit 1; }
-    python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print("WAITING_FOR_ANSWER" if s.get("waitingForAnswer") else "NOTIFIED" if s.get("hasNotifications") else "STILL_RUNNING" if s["job"]["status"] in ("queued","running") else "DONE")' "$WORK/status.json"
-  else
-    local n=0
-    until [ -f "$WORK/exit" ] || [ $n -ge 114 ]; do sleep 5; n=$((n+1)); done
-    [ -f "$WORK/exit" ] && echo DONE || echo STILL_RUNNING
-  fi
-}
-
 do_collect() {
   WORK="$1"
   if [ -f "$WORK/job" ]; then
-    if [ ! -f "$WORK/status.json" ]; then
-      # Launch-only (WAIT: no): report the job without waiting.
-      node "$(cat "$WORK/companion")" status "$(cat "$WORK/job")" --cwd "$(cat "$WORK/cwd")" --json > "$WORK/status.json" 2>/dev/null
-      echo "STATUS: started"
-      echo "JOB: $(cat "$WORK/job")"
-      python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print("THREAD: " + (s["job"].get("threadId") or ""))' "$WORK/status.json" 2>/dev/null || echo "THREAD: "
-      [ -f "$WORK/note" ] && cat "$WORK/note"
-      return 0
-    fi
-    python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); j=s["job"]; print("STATUS: " + ("waiting-for-answer" if s.get("waitingForAnswer") else "notified" if s.get("hasNotifications") else "done" if j["status"]=="completed" else "failed")); print("JOB: " + j["id"]); print("THREAD: " + (j.get("threadId") or ""))' "$WORK/status.json"
-    [ -f "$WORK/note" ] && cat "$WORK/note"
-    if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("waitingForAnswer") else 1)' "$WORK/status.json"; then
-      cat "$WORK/status.json"
-    elif python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("hasNotifications") else 1)' "$WORK/status.json"; then
-      python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); [print("- [" + str(n.get("receivedAt","")) + "] " + str(n.get("message",""))) for n in ((s["job"].get("live") or {}).get("notifications") or [])]' "$WORK/status.json"
-    else
-      node "$(cat "$WORK/companion")" result "$(cat "$WORK/job")" --cwd "$(cat "$WORK/cwd")"
-    fi
+    node "$(cat "$WORK/companion")" status "$(cat "$WORK/job")" --cwd "$(cat "$WORK/cwd")" --json > "$WORK/status.json" 2>/dev/null
+    echo "STATUS: started"
+    echo "JOB: $(cat "$WORK/job")"
+    python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print("THREAD: " + (s["job"].get("threadId") or ""))' "$WORK/status.json" 2>/dev/null || echo "THREAD: "
   else
-    if [ "$(cat "$WORK/wait" 2>/dev/null)" = no ] && [ ! -f "$WORK/exit" ]; then
-      # Launch-only on the detached path (review modes): no job id at launch; the monitor reports DONE/FAILED with it.
-      echo "STATUS: started"; echo "JOB: "; echo "THREAD: "
-      echo "NOTE: started detached without a job id; the monitor's DONE/FAILED event carries it, then read the output with result <job-id>"
-      [ -f "$WORK/note" ] && cat "$WORK/note"
-      return 0
-    fi
-    [ -s "$WORK/out.txt" ] && echo "STATUS: done" || echo "STATUS: failed"
-    local T
-    T=$(grep -o 'Thread ready ([^)]*)' "$WORK/log" 2>/dev/null | tail -1 | sed 's/Thread ready (\(.*\))/\1/'); [ -n "$T" ] && echo "THREAD: $T"
-    [ -f "$WORK/note" ] && cat "$WORK/note"
-    cat "$WORK/out.txt" 2>/dev/null
-    [ -s "$WORK/out.txt" ] || { echo '--- CODEX_FAILED, last 20 log lines:'; tail -20 "$WORK/log" 2>/dev/null; }
+    # Detached path (review modes): no job id at launch; the monitor's DONE/FAILED event carries it.
+    echo "STATUS: started"; echo "JOB: "; echo "THREAD: "
+    echo "NOTE: started detached without a job id; the monitor's DONE/FAILED event carries it, then read the output with result <job-id>"
   fi
+  [ -f "$WORK/note" ] && cat "$WORK/note"
   return 0
 }
 
-# dispatch [input-file]: launch without waiting, then collect. The brief comes from the file or from stdin.
+# dispatch [input-file]: launch, then collect. The brief comes from the file or from stdin.
 do_dispatch() {
   local input="${1:-}"
   if [ -z "$input" ]; then
     input=$(mktemp -d "${TMPDIR:-/tmp}/codex-worker.XXXXXX")/input.md
     cat > "$input"
   fi
-  LAUNCH_ONLY=1
   do_launch "$input"
   do_collect "$WORK"
 }
@@ -233,7 +186,7 @@ do_events() {
   local CC
   CC=$(select_companion)
   if [ -z "$CC" ] || ! grep -q 'case "events":' "$CC"; then
-    echo "EVENTS_UNSUPPORTED: the installed plugin has no events subcommand; wait with codex-worker instead"
+    echo "EVENTS_UNSUPPORTED: the installed plugin has no events subcommand; install a plugin version that has it"
     exit 2
   fi
   exec node "$CC" events "$@"
@@ -242,9 +195,8 @@ do_events() {
 case "${1:-}" in
   dispatch)  do_dispatch "${2:-}" ;;
   launch)    do_launch "$2" ;;
-  wait)      do_wait "$2" ;;
   collect)   do_collect "$2" ;;
   companion) select_companion ;;
   events)    shift; do_events "$@" ;;
-  *) echo "usage: codex-worker.sh dispatch [input-file] | launch <input-file> | wait <WORK> | collect <WORK> | companion | events --cwd <repo>"; exit 1 ;;
+  *) echo "usage: codex-worker.sh dispatch [input-file] | launch <input-file> | collect <WORK> | companion | events --cwd <repo>"; exit 1 ;;
 esac
