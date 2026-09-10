@@ -13,8 +13,8 @@ Three files and one config snippet:
 | File | Purpose |
 |---|---|
 | `skills/codex-director/SKILL.md` | Working rules for the Claude main thread: what to delegate, how to write a brief, how to run things in parallel, how the review loop works |
-| `agents/codex-worker.md` | A subagent with only the Bash tool. It writes the brief to a file, calls the worker script, and returns the output unchanged |
-| `skills/codex-director/scripts/codex-worker.sh` | The worker's shell logic: picks the Codex command by MODE, prepends the director note, starts Codex through the plugin's `codex-companion.mjs`, waits, collects; also streams job events for the director's monitor |
+| `skills/codex-director/scripts/codex-worker.sh` | All dispatch logic: picks the Codex command by MODE, prepends the director note, starts Codex through the plugin's `codex-companion.mjs`, waits, collects; `dispatch` starts a job in one call, `events` streams job events for the director's monitor |
+| `agents/codex-worker.md` | Fallback subagent with only the Bash tool, used when the event monitor is not available. It writes the brief to a file, calls the worker script, waits, and returns the output unchanged |
 | `docs/claude-md-snippet.md` | A routing rule for `CLAUDE.md` so that matching tasks always go through this path |
 
 Flow:
@@ -23,24 +23,24 @@ Flow:
 sequenceDiagram
     participant U as User
     participant C as Claude main thread
-    participant W as codex-worker
+    participant M as Event monitor (codex-worker.sh events)
     participant X as Codex
 
     U->>C: describes the task
     C->>C: loads codex-director, writes a brief
-    par parallel dispatch
-        C->>W: MODE: implement
-        C->>W: MODE: investigate
+    C->>M: arms one persistent monitor per repository
+    par parallel dispatch, one Bash call to codex-worker.sh dispatch each
+        C->>X: MODE: implement
+        C->>X: MODE: investigate
     end
-    W->>X: starts codex-companion task detached
-    W->>W: waits in foreground Bash calls until Codex exits
-    W-->>C: STATUS: done + Codex output verbatim
-    C->>W: MODE: adversarial-review
-    W->>X: review
-    X-->>W: findings
-    W-->>C: verbatim
-    C->>W: MODE: continue, WRITE: yes (Codex fixes its own findings)
-    C->>C: runs tests, spot-checks file:line claims
+    Note over C: each dispatch returns STATUS: started, JOB, THREAD within seconds
+    M-->>C: DONE job=... (one line per event, also QUESTION, NOTIFIED, FAILED, STALLED)
+    C->>X: reads the output with result <job-id>
+    C->>X: MODE: adversarial-review
+    M-->>C: DONE
+    C->>X: MODE: continue, WRITE: yes (Codex fixes its own findings)
+    M-->>C: DONE
+    C->>C: runs tests, spot-checks file:line claims, stops the monitor
     C->>U: reports
 ```
 
@@ -95,11 +95,11 @@ Make order export asynchronous and send an email when it finishes
 Review the changes on this branch
 ```
 
-Claude loads codex-director, writes a brief, dispatches codex-worker, waits, spot-checks, and reports. You can also name it directly: "ask codex to look into X".
+Claude loads codex-director, writes a brief, dispatches it to Codex, waits for the monitor's event, spot-checks, and reports. You can also name it directly: "ask codex to look into X".
 
 ### Brief format
 
-What Claude sends to codex-worker. A few header lines carry control parameters; after a blank line comes the body Codex reads:
+What Claude hands to the worker script (or to the fallback codex-worker agent). A few header lines carry control parameters; after a blank line comes the body Codex reads:
 
 ```
 MODE: implement
@@ -124,7 +124,7 @@ EFFORT: high
 | `adversarial-review` | Challenge-style review; the body is the focus text | No |
 | `wait` | Keep waiting on a running job (`JOB:` header); fallback when the event monitor is not available | No |
 
-Optional headers: `EFFORT` (`medium` / `high` / `xhigh`, default high), `MODEL` (defaults to the model in your Codex config), `BASE` (base ref for review modes), `THREAD` (the Codex thread a `continue` must resume), `SIBLINGS` (one line naming other running Codex tasks, shown to Codex), `WAIT: no` (return right after launch; used with the event monitor), `CWD` (repository to run in).
+Optional headers: `EFFORT` (`medium` / `high` / `xhigh`, default high), `MODEL` (defaults to the model in your Codex config), `BASE` (base ref for review modes), `THREAD` (the Codex thread a `continue` must resume), `SIBLINGS` (one line naming other running Codex tasks, shown to Codex), `WAIT: no` (fallback agent only: return right after launch; `dispatch` always does), `CWD` (repository to run in).
 
 ### Thread continuity
 
@@ -142,15 +142,15 @@ While Codex is running, `/codex:status` lists the running and recently finished 
 
 ## Design decisions
 
-**Codex output is never compressed.** The forwarder returns Codex's stdout unchanged. Claude's context is saved by the division of labor itself (Claude does not read files or write code), not by truncating or summarizing Codex's answer.
+**Codex output is never compressed.** Claude reads Codex's result with `result <job-id>`, and the fallback forwarder returns Codex's stdout unchanged. Claude's context is saved by the division of labor itself (Claude does not read files or write code), not by truncating or summarizing Codex's answer.
 
 **One thread per problem, review only when it earns its cost.** For code changes, `implement` runs first (or `investigate` then `continue` with the implementation when the affected area is unclear). When the implementation comes back, Claude judges whether an `adversarial-review` is worth its cost for this particular change and says so either way. Findings go back to the same thread via `continue` to fix, up to three rounds.
 
-**Parallel writes use worktrees.** Only one `implement` runs per checkout at a time. To have Codex produce two approaches, dispatch the agent with `isolation: "worktree"` so each works in its own tree, and Claude picks one.
+**Parallel writes use worktrees.** Only one `implement` runs per checkout at a time. To have Codex produce two approaches, give each route its own `git worktree` and pass it as `CWD:` (or `isolation: "worktree"` on the fallback agent), and Claude picks one.
 
-**Detached start, bounded waits.** Task runs use native background jobs and foreground `status --wait` calls of under 10 minutes. The worker returns on completion or a structured question; after a question, the director answers and collects that same job. Reviews and older plugins retain the detached-process wait loop.
+**Detached start, events instead of waits.** Task runs use native background jobs; `dispatch` returns as soon as the job id is known and the event monitor reports completion, questions, and notes. Without the monitor, the fallback worker waits in foreground `status --wait` calls of under 10 minutes and returns on completion or a structured question; after a question, the director answers and collects that same job. Reviews and older plugins retain the detached-process wait loop.
 
-**Decision logic lives in shell, not in the model's judgment.** For review modes, the choice between branch mode, working-tree mode, and the fallback is a fixed script. The forwarder pastes its input into a file and calls `codex-worker.sh`; it fills in nothing.
+**Decision logic lives in shell, not in the model's judgment.** For review modes, the choice between branch mode, working-tree mode, and the fallback is a fixed script. Claude pastes the brief into `codex-worker.sh dispatch` and fills in nothing else; the fallback agent does the same through `launch`.
 
 **Simple tasks are not delegated.** Anything Claude can finish in about three tool calls without understanding unfamiliar code (a lookup, a grep, a few-line fix at a known place, running a command) is done directly; a dispatch costs a brief and at least a minute of waiting.
 
@@ -171,11 +171,11 @@ With a plugin version supporting live controls, `/codex:message <job-id> <text>`
 
 For a structured question, the director receives `STATUS: waiting-for-answer` (from a waiting worker) or a `QUESTION` event (from the monitor, see below) while Codex remains active. It supplies an answers-map JSON file, such as `{"source":{"answers":["Use the latest plan."]}}`, through `/codex:answer <job-id> --request-id <id> --answers-file <path>`. Without the monitor it then dispatches the worker again with `MODE: wait` and `JOB: <job-id>` to keep waiting on the same job. Questions time out after 10 minutes. `/codex:status <job-id>` exposes pending messages, questions, notifications, and interruption state.
 
-**Event monitor instead of waiting workers.** On plugins with the `events` subcommand, the director arms one persistent Claude Code Monitor per repository running `codex-worker.sh events --cwd <repo>`, and dispatches workers with `WAIT: no` so they return right after launch. Each job event then lands in the director's conversation as one line: `DONE`, `FAILED`, `QUESTION`, or `NOTIFIED`. No subagent round trip per event, no 9.5-minute rounds, one channel for all jobs. The waiting worker and `MODE: wait` remain the fallback for older plugins.
+**Event monitor instead of waiting workers.** On plugins with the `events` subcommand, the director arms one persistent Claude Code Monitor per repository running `codex-worker.sh events --cwd <repo>`, and starts each job with one Bash call to `codex-worker.sh dispatch`, which returns right after launch. Each job event then lands in the director's conversation as one line: `DONE`, `FAILED`, `QUESTION`, `NOTIFIED`, or `STALLED`. No subagent at all, no 9.5-minute rounds, one channel for all jobs. The waiting codex-worker agent and `MODE: wait` remain the fallback for older plugins or sessions without the Monitor tool.
 
 Codex knows who started it. For `investigate` and `implement`, the worker script prepends a short note to the brief: Codex was started by a director agent rather than a human, `request_user_input` questions go to the director, other Codex tasks may be running (listed from the director's `SIBLINGS:` header) and Codex must not coordinate with them itself. On plugins that expose the `notify_director` tool, Codex can also send the director a one-line note without stopping; it arrives as a `NOTIFIED` event or as `STATUS: notified` from a waiting worker while the job keeps running. Codex tasks never talk to each other; the director relays.
 
-The worker agent itself is a thin wrapper: it writes its input to a file and calls `skills/codex-director/scripts/codex-worker.sh` (`launch`, `wait`, `collect`). All command selection, review fallbacks, and the director note live in that script, so the agent's context stays small and the logic can be tested with `bash -n` and a stub companion.
+The fallback worker agent is a thin wrapper: it writes its input to a file and calls `skills/codex-director/scripts/codex-worker.sh` (`launch`, `wait`, `collect`); `dispatch` is `launch` plus `collect` without waiting. All command selection, review fallbacks, and the director note live in that script, so the logic can be tested with `bash -n` and a stub companion.
 
 Native next-turn queues are distinct from these mid-turn controls. Update the installed plugin and restart the Claude session to use the new broker; editing this checkout does not update installed copies.
 

@@ -14,24 +14,38 @@ Premise: Codex quota is effectively unlimited. The scarce resource is the Claude
 
 ## Dispatching
 
-Use the Agent tool with `subagent_type: "codex-worker"` and set `model` explicitly to `opus` (the forwarder only assembles commands and reads files; it does not need the main thread's model). Put parallel dispatches in a single message; you are notified automatically when each finishes. Do not poll.
+All dispatch logic lives in `~/.claude/skills/codex-director/scripts/codex-worker.sh` (which Codex command to run, the director note, sandbox flags, review fallbacks). With the event monitor (below) you call that script directly from one foreground Bash call; no subagent is involved. Each dispatch is one call:
 
-A Codex task may run for any length of time. Do not re-dispatch because it is taking long. `/codex:status` lists jobs and `/codex:status <job-id>` shows pending messages, questions, notifications, and interruption state. All shell logic of the worker lives in `~/.claude/skills/codex-director/scripts/codex-worker.sh`; you call that script yourself only for `companion` (print the selected `codex-companion.mjs`) and `events` (below).
+```bash
+bash ~/.claude/skills/codex-director/scripts/codex-worker.sh dispatch <<'INPUT'
+MODE: investigate
+EFFORT: high
+CWD: /abs/path/to/repo
+
+<brief>
+INPUT
+```
+
+It returns within seconds with `STATUS: started`, `JOB: <id>`, `THREAD: <id>` (possibly empty), and sometimes a `NOTE:` line; the monitor reports everything after that. Put parallel dispatches in one message as separate Bash calls. Do not poll.
+
+The `codex-worker` agent (Agent tool, `subagent_type: "codex-worker"`, `model` set explicitly to `opus`) is the fallback for plugins without `events` or sessions without the Monitor tool: it runs the same script and waits in bounded rounds on the main thread's behalf. Do not use it when the monitor is available; that only adds a subagent round trip and a duplicate completion notice per job.
+
+A Codex task may run for any length of time. Do not re-dispatch because it is taking long. `/codex:status` lists jobs and `/codex:status <job-id>` shows pending messages, questions, notifications, and interruption state.
 
 ### Waiting: one event monitor per session
 
 Preferred, on plugins whose companion has the `events` subcommand (check once per session: `grep -q 'case "events":' "$(bash ~/.claude/skills/codex-director/scripts/codex-worker.sh companion)"`):
 
 1. Before the first dispatch into a repository, arm one Monitor with `persistent: true` and the command `bash ~/.claude/skills/codex-director/scripts/codex-worker.sh events --cwd <repo>` (description: "Codex job events in <repo>"). One monitor per repository. Note its task id: the monitor is yours to stop.
-2. Dispatch codex-worker with `WAIT: no` in the header. It returns `STATUS: started`, `JOB:`, and `THREAD:` (possibly empty) within seconds and frees the main thread.
+2. Dispatch with the `dispatch` subcommand shown above. Review modes start detached and return an empty `JOB:`; their job id arrives in the monitor's `DONE` or `FAILED` line.
 3. Each line the monitor emits is one event and arrives on its own schedule; it is not user input. Lines: `DONE job=<id> thread=<id>`, `FAILED job=<id> thread=<id> <reason>`, `QUESTION job=<id> request=<id> <first question>`, `NOTIFIED job=<id> thread=<id> <note>`, `STALLED job=<id> thread=<id> <n>m without progress`. On `DONE` run `node "$(bash ~/.claude/skills/codex-director/scripts/codex-worker.sh companion)" result <job-id> --cwd <repo>` in a foreground Bash call and judge the output as usual. On `QUESTION` run `status <job-id> --cwd <repo> --json` on the same companion to read the questions, then answer (below). On `NOTIFIED` react (below). On `STALLED`, or when an active job has produced no event for about 15 minutes, run `status <job-id>` at once and look at the owner process and the time of the last progress entry; a job whose owner has exited is dead even if the store still says running, so report it and re-dispatch instead of waiting. Never let a silent job sit unchecked for an hour. Nothing else needs re-dispatching; the monitor keeps reporting.
 4. **Stop the monitor when the work is done.** Once every job you dispatched has reported `DONE` or `FAILED` and you are writing the final report to the user, call TaskStop on the monitor's task id. A monitor left running after the task is finished sits in the user's session for hours doing nothing useful. Arm a new one at the next dispatch; arming is one call.
 
 Sandbox: every Codex task runs without a sandbox (full read/write access and network), which is the user's standing policy; codex-worker passes `--sandbox danger-full-access` unless the header says otherwise. Read-only intent for `investigate` is stated in the brief, not enforced by the sandbox, so keep writing "read-only, do not modify files" into investigation briefs. `SANDBOX: network` (workspace-write plus network) or `SANDBOX: default` (the plugin's own read-only / workspace-write choice) narrow it for a single task; use them only when the user asks. On plugins without the `--sandbox` option the task runs in the plugin's default sandbox and cannot open sockets; a Codex report that tests could not run there is not a test failure.
 
-Fallback, when the plugin has no `events` or the Monitor tool is unavailable: dispatch without `WAIT: no`. The worker then waits in bounded rounds and returns `STATUS: done`, `waiting-for-answer`, or `notified`; after handling a question or note, dispatch `MODE: wait` with `JOB: <id>` to keep waiting. Never run both a monitor and a waiting worker on the same job: whichever collects a notification acknowledges it and the other never sees it.
+Fallback, when the plugin has no `events` or the Monitor tool is unavailable: dispatch the `codex-worker` agent with the same header-and-body text as its prompt (without `WAIT: no`). It waits in bounded rounds and returns `STATUS: done`, `waiting-for-answer`, or `notified` with Codex's output verbatim; after handling a question or note, dispatch it again with `MODE: wait` and `JOB: <id>` to keep waiting. Never run both a monitor and a waiting worker on the same job: whichever collects a notification acknowledges it and the other never sees it.
 
-Prompt format: a few header lines, a blank line, then the brief body. Add `CWD: <absolute path>` when Codex must run in a repository other than the current directory (codex-worker inherits your working directory otherwise). Add `SIBLINGS: <one line>` when other Codex tasks you started are still running: name each with its job ID and a few words on what it does. codex-worker copies the line into the note it prepends for Codex (see "What Codex knows about you" below).
+Prompt format: a few header lines, a blank line, then the brief body. Add `CWD: <absolute path>` when Codex must run in a repository other than the current directory (the script inherits your working directory otherwise). Add `SIBLINGS: <one line>` when other Codex tasks you started are still running: name each with its job ID and a few words on what it does. codex-worker copies the line into the note it prepends for Codex (see "What Codex knows about you" below).
 
 ```
 MODE: investigate
@@ -106,7 +120,7 @@ For `investigate` and `implement`, codex-worker prepends a fixed note to your br
 
 ### Isolate tasks that write files
 
-Only one `implement` per checkout at a time. To run parallel edits (for example, two approaches by Codex), dispatch the agent with `isolation: "worktree"` so each route edits its own worktree; compare afterwards and merge the one you pick. Read-only tasks need no isolation.
+Only one `implement` per checkout at a time. To run parallel edits (for example, two approaches by Codex), give each route its own worktree (`git worktree add <path> <branch>`) and put that path in `CWD:`; compare afterwards and merge the one you pick. On the agent fallback, `isolation: "worktree"` on the Agent tool does the same. Read-only tasks need no isolation.
 
 ## Brief template
 
@@ -158,7 +172,7 @@ When the context is long and early information starts getting lost, run `/codex:
 
 ## After receiving a result
 
-The forwarder returns Codex's text verbatim with a single STATUS line prepended.
+With the monitor, you read Codex's text yourself with the companion's `result <job-id>`; the fallback worker returns it verbatim with a single STATUS line prepended.
 
 - Spot-check one or two `file:line` references before trusting them; Codex is also wrong sometimes.
 - On `STATUS: failed` or `CODEX_FAILED`: report the most useful log lines to the user. Do not take over and redo the whole task yourself.

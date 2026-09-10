@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Shell side of the codex-worker agent. The agent only pastes its input into a file and calls:
+# Shell side of Codex dispatching. With the event monitor the director calls it directly:
+#   codex-worker.sh dispatch [input-file]  read the brief from the file or stdin, start Codex, return at once with
+#                                          STATUS: started / JOB / THREAD (launch + collect in one call)
+# The codex-worker agent (fallback without the monitor) pastes its input into a file and calls:
 #   codex-worker.sh launch <input-file>   parse the header lines, start Codex, print WORK=... JOB=... STARTED
 #   codex-worker.sh wait <WORK>           one bounded wait (about 9.5 minutes); prints STILL_RUNNING | WAITING_FOR_ANSWER | NOTIFIED | DONE
 #   codex-worker.sh collect <WORK>        print the STATUS / JOB / THREAD lines and the payload
@@ -75,6 +78,10 @@ do_launch() {
   CC=$(select_companion)
   if [ -z "$CC" ]; then echo "CODEX_FAILED: no codex-companion.mjs found under ~/.claude/plugins/cache"; exit 1; fi
   parse_input "$input"
+  if [ -n "${LAUNCH_ONLY:-}" ]; then
+    WAIT=no
+    if [ "$MODE" = wait ]; then echo "CODEX_FAILED: dispatch does not take MODE: wait; the event monitor reports the job"; exit 1; fi
+  fi
   printf '%s\n' "$CC" > "$WORK/companion"
   printf '%s\n' "$CWD" > "$WORK/cwd"
   printf '%s\n' "${WAIT:-yes}" > "$WORK/wait"
@@ -193,6 +200,13 @@ do_collect() {
       node "$(cat "$WORK/companion")" result "$(cat "$WORK/job")" --cwd "$(cat "$WORK/cwd")"
     fi
   else
+    if [ "$(cat "$WORK/wait" 2>/dev/null)" = no ] && [ ! -f "$WORK/exit" ]; then
+      # Launch-only on the detached path (review modes): no job id at launch; the monitor reports DONE/FAILED with it.
+      echo "STATUS: started"; echo "JOB: "; echo "THREAD: "
+      echo "NOTE: started detached without a job id; the monitor's DONE/FAILED event carries it, then read the output with result <job-id>"
+      [ -f "$WORK/note" ] && cat "$WORK/note"
+      return 0
+    fi
     [ -s "$WORK/out.txt" ] && echo "STATUS: done" || echo "STATUS: failed"
     local T
     T=$(grep -o 'Thread ready ([^)]*)' "$WORK/log" 2>/dev/null | tail -1 | sed 's/Thread ready (\(.*\))/\1/'); [ -n "$T" ] && echo "THREAD: $T"
@@ -201,6 +215,18 @@ do_collect() {
     [ -s "$WORK/out.txt" ] || { echo '--- CODEX_FAILED, last 20 log lines:'; tail -20 "$WORK/log" 2>/dev/null; }
   fi
   return 0
+}
+
+# dispatch [input-file]: launch without waiting, then collect. The brief comes from the file or from stdin.
+do_dispatch() {
+  local input="${1:-}"
+  if [ -z "$input" ]; then
+    input=$(mktemp -d "${TMPDIR:-/tmp}/codex-worker.XXXXXX")/input.md
+    cat > "$input"
+  fi
+  LAUNCH_ONLY=1
+  do_launch "$input"
+  do_collect "$WORK"
 }
 
 do_events() {
@@ -214,10 +240,11 @@ do_events() {
 }
 
 case "${1:-}" in
+  dispatch)  do_dispatch "${2:-}" ;;
   launch)    do_launch "$2" ;;
   wait)      do_wait "$2" ;;
   collect)   do_collect "$2" ;;
   companion) select_companion ;;
   events)    shift; do_events "$@" ;;
-  *) echo "usage: codex-worker.sh launch <input-file> | wait <WORK> | collect <WORK> | companion | events --cwd <repo>"; exit 1 ;;
+  *) echo "usage: codex-worker.sh dispatch [input-file] | launch <input-file> | wait <WORK> | collect <WORK> | companion | events --cwd <repo>"; exit 1 ;;
 esac

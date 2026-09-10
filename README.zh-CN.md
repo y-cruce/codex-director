@@ -13,8 +13,8 @@
 | 文件 | 作用 |
 |---|---|
 | `skills/codex-director/SKILL.md` | 给 Claude 主线程的工作规则：什么活派出去、任务书怎么写、并行怎么派、review 循环怎么跑 |
-| `agents/codex-worker.md` | 一个只有 Bash 工具的子 agent。把任务书写进文件、调用 worker 脚本、把输出原样带回 |
-| `skills/codex-director/scripts/codex-worker.sh` | worker 的 shell 逻辑：按 MODE 选 Codex 命令、加上给 Codex 的调度者说明、通过插件的 `codex-companion.mjs` 启动、等待、收集；也给主会话的监视器输出任务事件 |
+| `skills/codex-director/scripts/codex-worker.sh` | 全部派单逻辑：按 MODE 选 Codex 命令、加上给 Codex 的调度者说明、通过插件的 `codex-companion.mjs` 启动、等待、收集；`dispatch` 一次调用启动一个任务，`events` 给主会话的监视器输出任务事件 |
+| `agents/codex-worker.md` | 兜底用的子 agent，只有 Bash 工具，事件监视器不可用时才派。把任务书写进文件、调用 worker 脚本、等待、把输出原样带回 |
 | `docs/claude-md-snippet.md` | 加进 `CLAUDE.md` 的路由规则，保证相关任务每次都走这条路 |
 
 工作流程：
@@ -23,24 +23,24 @@
 sequenceDiagram
     participant U as 用户
     participant C as Claude 主线程
-    participant W as codex-worker
+    participant M as 事件监视器（codex-worker.sh events）
     participant X as Codex
 
     U->>C: 描述需求
     C->>C: 加载 codex-director，写任务书
-    par 并行派发
-        C->>W: MODE: implement
-        C->>W: MODE: investigate
+    C->>M: 每个仓库常驻一个监视器
+    par 并行派发，每路一次 Bash 调用 codex-worker.sh dispatch
+        C->>X: MODE: implement
+        C->>X: MODE: investigate
     end
-    W->>X: 以脱离进程方式启动 codex-companion task
-    W->>W: 在前台 Bash 调用里循环等待 Codex 退出
-    W-->>C: STATUS: done + Codex 原文
-    C->>W: MODE: adversarial-review
-    W->>X: review
-    X-->>W: 问题列表
-    W-->>C: 原文回传
-    C->>W: MODE: continue, WRITE: yes（让 Codex 自己修）
-    C->>C: 跑测试、抽查 文件:行号
+    Note over C: 每次派发几秒内返回 STATUS: started、JOB、THREAD
+    M-->>C: DONE job=...（每个事件一行，还有 QUESTION、NOTIFIED、FAILED、STALLED）
+    C->>X: 用 result <job-id> 读取结果
+    C->>X: MODE: adversarial-review
+    M-->>C: DONE
+    C->>X: MODE: continue, WRITE: yes（让 Codex 自己修）
+    M-->>C: DONE
+    C->>C: 跑测试、抽查 文件:行号、停掉监视器
     C->>U: 汇报
 ```
 
@@ -95,11 +95,11 @@ cd codex-director
 review 一下这个分支的改动
 ```
 
-Claude 会加载 codex-director，写任务书，派 codex-worker，等结果，抽查，汇报。你也可以直接点名：「用 codex 查一下 X」。
+Claude 会加载 codex-director，写任务书，派给 Codex，等监视器的事件，抽查，汇报。你也可以直接点名：「用 codex 查一下 X」。
 
 ### 任务书格式
 
-Claude 派给 codex-worker 的内容长这样。头部几行是控制参数，空一行后是给 Codex 看的正文：
+Claude 交给 worker 脚本（或兜底的 codex-worker agent）的内容长这样。头部几行是控制参数，空一行后是给 Codex 看的正文：
 
 ```
 MODE: implement
@@ -124,7 +124,7 @@ EFFORT: high
 | `adversarial-review` | 挑刺式 review，正文写关注点 | 不会 |
 | `wait` | 继续等一个正在跑的任务（头部 `JOB:`），没有事件监视器时的兜底 | 不会 |
 
-可选头部：`EFFORT`（`medium` / `high` / `xhigh`，缺省 high）、`MODEL`（缺省用你 Codex 配置里的模型）、`BASE`（review 类的基准分支）、`THREAD`（`continue` 必须续上的 Codex 线程）、`SIBLINGS`（一行写明其他正在跑的 Codex 任务，会给 Codex 看）、`WAIT: no`（启动完就返回，配合事件监视器用）、`CWD`（在哪个仓库里跑）。
+可选头部：`EFFORT`（`medium` / `high` / `xhigh`，缺省 high）、`MODEL`（缺省用你 Codex 配置里的模型）、`BASE`（review 类的基准分支）、`THREAD`（`continue` 必须续上的 Codex 线程）、`SIBLINGS`（一行写明其他正在跑的 Codex 任务，会给 Codex 看）、`WAIT: no`（只对兜底 agent 有意义：启动完就返回；`dispatch` 本来就如此）、`CWD`（在哪个仓库里跑）。
 
 ### 线程连续性
 
@@ -146,25 +146,25 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 遇到结构化反问，主会话会收到 `STATUS: waiting-for-answer`（来自等待中的 worker）或一条 `QUESTION` 事件（来自下面说的监视器），底层 Codex 仍在等待。主会话按问题 ID 写入回答 JSON，例如 `{"source":{"answers":["从方案中心读取最新方案"]}}`，再执行 `/codex:answer <job-id> --request-id <id> --answers-file <绝对路径>`。没有监视器时，随后用 `MODE: wait` 加 `JOB: <job-id>` 再派一次 worker 继续等同一任务，不重新派单。默认等待回答 10 分钟，超时会中断并报告。
 
-**用事件监视器代替等待的 worker。** 插件带 `events` 子命令时，主会话对每个仓库用 Claude Code 的 Monitor 工具常驻运行一次 `codex-worker.sh events --cwd <仓库>`，派 worker 时加 `WAIT: no`，worker 启动完就返回。之后每个任务事件都以一行文字直接进入主会话：`DONE`、`FAILED`、`QUESTION`、`NOTIFIED`。每个事件不再需要一次子 agent 往返，没有 9.5 分钟一轮的限制，所有任务共用一条通道。旧插件仍用等待的 worker 和 `MODE: wait` 兜底。
+**用事件监视器代替等待的 worker。** 插件带 `events` 子命令时，主会话对每个仓库用 Claude Code 的 Monitor 工具常驻运行一次 `codex-worker.sh events --cwd <仓库>`，每个任务用一次 Bash 调用 `codex-worker.sh dispatch` 启动，启动完就返回。之后每个任务事件都以一行文字直接进入主会话：`DONE`、`FAILED`、`QUESTION`、`NOTIFIED`、`STALLED`。全程不需要子 agent，没有 9.5 分钟一轮的限制，所有任务共用一条通道。旧插件或没有 Monitor 工具的会话仍用等待的 codex-worker agent 和 `MODE: wait` 兜底。
 
 Codex 知道自己是被谁启动的。`investigate` 和 `implement` 两种模式下，worker 脚本会在任务书前面加一段固定说明：你是由调度代理启动的，不是人类；`request_user_input` 的提问由调度代理回答；同一工作区可能还有其他 Codex 任务在跑（名单来自主会话派单时的 `SIBLINGS:` 头），不要自行协调，有事告诉调度代理。插件支持 `notify_director` 工具时，Codex 还可以在不停下来的情况下给调度代理发一句话，以 `NOTIFIED` 事件或 worker 的 `STATUS: notified` 送达，任务继续跑。Codex 任务之间不直接对话，全部由主会话中转。
 
-worker 这个 agent 本身只是一层薄壳：把收到的输入写进文件，调用 `skills/codex-director/scripts/codex-worker.sh` 的 `launch`、`wait`、`collect` 三个子命令。选哪条 Codex 命令、review 的兜底、给 Codex 的说明都在脚本里，agent 的上下文很小，脚本本身可以用 `bash -n` 和桩 companion 测试。
+兜底的 worker agent 只是一层薄壳：把收到的输入写进文件，调用 `skills/codex-director/scripts/codex-worker.sh` 的 `launch`、`wait`、`collect` 三个子命令；`dispatch` 等于 `launch` 加 `collect` 但不等待。选哪条 Codex 命令、review 的兜底、给 Codex 的说明都在脚本里，脚本本身可以用 `bash -n` 和桩 companion 测试。
 
 `status <job-id>` 可以查看待消费消息、问题、通知和中断状态。消息被接受不代表模型已经执行；原生“下一轮排队”与这里的中途纠偏不同。本次插件修改不会自动更新已安装副本；更新插件后重开 Claude 会话，使新 broker 生效。
 
 ## 设计上的几个决定
 
-**Codex 输出不压缩。** 转发器把 Codex 的 stdout 一字不动带回主线程。省 Claude 上下文的手段只有分工本身（Claude 不读文件、不写代码），不靠截断或摘要 Codex 的回答。
+**Codex 输出不压缩。** Claude 用 `result <job-id>` 读 Codex 的结果，兜底的转发器则把 Codex 的 stdout 一字不动带回主线程。省 Claude 上下文的手段只有分工本身（Claude 不读文件、不写代码），不靠截断或摘要 Codex 的回答。
 
 **一个问题一个线程，review 只在值得时做。** 改代码类任务先派 `implement`（改动范围不清楚时先 `investigate`，再在同一线程里 `continue` 做实现）。实现回来后由 Claude 自行判断这次改动值不值得派 `adversarial-review`，审或不审都会说明。有问题让 Codex 在同一线程里用 `continue` 自己修，最多三轮。
 
-**并行改文件用 worktree。** 同一个 checkout 里同时只跑一路 `implement`。要让 Codex 用两种方案各写一版，派 agent 时加 `isolation: "worktree"`，各改各的，Claude 最后挑。
+**并行改文件用 worktree。** 同一个 checkout 里同时只跑一路 `implement`。要让 Codex 用两种方案各写一版，给每一路建一个 `git worktree` 并写进 `CWD:`（兜底 agent 则加 `isolation: "worktree"`），各改各的，Claude 最后挑。
 
-**后台启动、有界等待。** task 类任务使用插件原生后台任务，通过不到 10 分钟的 `status --wait` 调用等待结果。完成、出现结构化反问或收到通知时 worker 返回；主会话处理后继续等待同一任务。插件支持 `events` 时改用事件监视器，worker 启动完即返回。review 和旧插件保留脱离进程的等待循环。
+**后台启动、用事件代替等待。** task 类任务使用插件原生后台任务，`dispatch` 拿到任务 ID 就返回，完成、结构化反问和通知都由事件监视器报告。没有监视器时，兜底 worker 用不到 10 分钟的 `status --wait` 调用在前台等待，完成或出现结构化反问时返回；主会话处理后继续等待同一任务。review 和旧插件保留脱离进程的等待循环。
 
-**判断逻辑写进 shell，不靠模型自觉。** review 类任务的分支模式 / 工作区模式 / 兜底三选一，写成了固定脚本，转发器只把收到的输入原样写进文件再调用 `codex-worker.sh`，自己什么都不填。
+**判断逻辑写进 shell，不靠模型自觉。** review 类任务的分支模式 / 工作区模式 / 兜底三选一，写成了固定脚本，Claude 把任务书原样交给 `codex-worker.sh dispatch`，别的什么都不填；兜底 agent 也只是通过 `launch` 做同样的事。
 
 **简单任务不委托。** Claude 三次工具调用以内、不需要理解陌生代码就能做完的事（查一个值、一次 grep、已知位置改几行、跑一条命令），直接自己做；派一次 Codex 要写任务书、还要等至少一分钟。
 
