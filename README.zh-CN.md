@@ -144,7 +144,7 @@ Codex 在跑的时候，执行 `/codex:status` 能看到本仓库正在跑和最
 
 遇到结构化反问，主会话会收到监视器（见下文）的一条 `QUESTION` 事件，底层 Codex 仍在等待。主会话按问题 ID 写入回答 JSON，例如 `{"source":{"answers":["从方案中心读取最新方案"]}}`，再执行 `/codex:answer <job-id> --request-id <id> --answers-file <绝对路径>`。默认等待回答 10 分钟，超时会中断并报告。
 
-**每个仓库一个事件监视器。** 主会话对每个仓库用 Claude Code 的 Monitor 工具常驻运行一次 `codex-worker.sh events --cwd <仓库>`，每个任务用一次 Bash 调用 `codex-worker.sh dispatch` 启动，启动完就返回。之后每个任务事件都以一行文字直接进入主会话：`DONE`、`FAILED`、`QUESTION`、`NOTIFIED`、`STALLED`。全程不需要子 agent，所有任务共用一条通道。
+**每个仓库一个事件监视器。** 主会话对每个仓库用 Claude Code 的 Monitor 工具常驻运行一次 `codex-worker.sh events --cwd <仓库>`，每个任务用一次 Bash 调用 `codex-worker.sh dispatch` 启动，启动完就返回。之后每个任务事件都以一行文字直接进入主会话：`DONE`、`FAILED`、`QUESTION`、`NOTIFIED`、`STALLED`。全程不需要子 agent，所有任务共用一条通道。事件流本身也会在连续一小时没有活跃任务后自行退出，最后打印一行 `IDLE_EXIT`，主会话忘了停的监视器不会再空转好几天。
 
 Codex 知道自己是被谁启动的。`investigate` 和 `implement` 两种模式下，worker 脚本会在任务书前面加一段固定说明：你是由调度代理启动的，不是人类；`request_user_input` 的提问由调度代理回答；同一工作区可能还有其他 Codex 任务在跑（名单来自主会话派单时的 `SIBLINGS:` 头），不要自行协调，有事告诉调度代理。插件支持 `notify_director` 工具时，Codex 还可以在不停下来的情况下给调度代理发一句话，以 `NOTIFIED` 事件送达，任务继续跑。Codex 任务之间不直接对话，全部由主会话中转。
 
